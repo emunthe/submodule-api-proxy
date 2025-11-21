@@ -85,6 +85,51 @@ async def _update_cached_data_size_metrics(redis_client):
         logger.error(f"Error updating cached data size metrics: {e}")
 
 
+async def clear_precache_data():
+    """Clear all precache data from Redis"""
+    redis_client = None
+    try:
+        redis_client = get_redis_client()
+        
+        # List of precache data keys to clear
+        precache_keys = [
+            "valid_seasons",
+            "tournaments_in_season", 
+            "tournament_matches",
+            "unique_team_ids"
+        ]
+        
+        cleared_keys = []
+        for key in precache_keys:
+            result = await redis_client.delete(key)
+            if result > 0:
+                cleared_keys.append(key)
+        
+        # Update metrics to reflect cleared data
+        await _update_cached_data_size_metrics(redis_client)
+        
+        # Reset last run timestamp
+        PRECACHE_LAST_RUN_TIMESTAMP.set(0)
+        
+        logger.info(f"Cleared precache data keys: {cleared_keys}")
+        
+        return {
+            "status": "success",
+            "message": f"Cleared {len(cleared_keys)} precache data keys",
+            "cleared_keys": cleared_keys
+        }
+        
+    except Exception as e:
+        logger.error(f"Error clearing precache data: {e}")
+        return {
+            "status": "error", 
+            "message": f"Failed to clear precache data: {str(e)}"
+        }
+    finally:
+        if redis_client:
+            await redis_client.close()
+
+
 async def detect_change_tournaments_and_matches(cache_manager, token_manager):
     """Periodically fetch season, tournament, match and team data.
 

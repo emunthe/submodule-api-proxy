@@ -14,7 +14,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from .cache import CacheManager
 from .config import config
-from .precache import detect_change_tournaments_and_matches
+from .precache import detect_change_tournaments_and_matches, clear_precache_data
 from .prometheus import (
     CACHE_HITS,
     CACHE_MISSES,
@@ -164,6 +164,17 @@ async def clear_cache(path: str):
 )
 async def clear_all_cache():
     return await cache_manager.clear_all_cache()
+
+
+@app.delete(
+    "/precache",
+    summary="Clear precache data",
+    description="Clear all precache data (seasons, tournaments, matches, team IDs) from Redis",
+    tags=["Cache"],
+)
+async def clear_precache():
+    """Clear all precache data from Redis."""
+    return await clear_precache_data()
 
 
 @app.get(
