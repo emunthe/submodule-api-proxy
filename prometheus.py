@@ -23,11 +23,23 @@ CACHE_REQUESTS_BY_TIME = Counter(
     ["endpoint", "hour", "day_of_week", "date"]
 )
 
-# Cache hit ratio as a gauge (0-1) for better graphing
-CACHE_HIT_RATIO = Gauge(
-    "cache_hit_ratio",
-    "Cache hit ratio (hits / total requests)",
-    ["endpoint"]
+# Cache hit and miss counters with time labels
+CACHE_HITS_BY_TIME = Counter(
+    "cache_hits_by_time_total",
+    "Cache hits with time labels",
+    ["endpoint", "hour", "day_of_week", "date"]
+)
+
+CACHE_MISSES_BY_TIME = Counter(
+    "cache_misses_by_time_total", 
+    "Cache misses with time labels",
+    ["endpoint", "hour", "day_of_week", "date"]
+)
+
+CACHE_REFRESH_BY_TIME = Counter(
+    "cache_refresh_by_time_total",
+    "Cache refreshes with time labels", 
+    ["endpoint", "hour", "day_of_week", "date"]
 )
 
 # Current cache size and status
@@ -38,19 +50,6 @@ CACHE_MEMORY_USAGE = Gauge("cache_memory_usage_bytes", "Cache memory usage in by
 REQUEST_RATE = Gauge(
     "request_rate_per_second",
     "Current request rate per second",
-    ["endpoint"]
-)
-
-# Cache performance over time windows
-CACHE_REQUESTS_LAST_HOUR = Gauge(
-    "cache_requests_last_hour",
-    "Cache requests in the last hour",
-    ["endpoint"]
-)
-
-CACHE_REQUESTS_LAST_DAY = Gauge(
-    "cache_requests_last_day", 
-    "Cache requests in the last 24 hours",
     ["endpoint"]
 )
 
@@ -69,7 +68,7 @@ def record_cache_request(endpoint, hit=True):
     """Record a cache request with time-based labels"""
     time_labels = get_time_labels()
     
-    # Record the time-based counter
+    # Record the time-based counter for all requests
     CACHE_REQUESTS_BY_TIME.labels(
         endpoint=endpoint,
         hour=time_labels["hour"],
@@ -77,18 +76,38 @@ def record_cache_request(endpoint, hit=True):
         date=time_labels["date"]
     ).inc()
     
-    # Record hit or miss
+    # Record hit or miss with time labels
     if hit:
         CACHE_HITS.labels(endpoint=endpoint).inc()
+        CACHE_HITS_BY_TIME.labels(
+            endpoint=endpoint,
+            hour=time_labels["hour"],
+            day_of_week=time_labels["day_of_week"],
+            date=time_labels["date"]
+        ).inc()
     else:
         CACHE_MISSES.labels(endpoint=endpoint).inc()
+        CACHE_MISSES_BY_TIME.labels(
+            endpoint=endpoint,
+            hour=time_labels["hour"],
+            day_of_week=time_labels["day_of_week"],
+            date=time_labels["date"]
+        ).inc()
 
-def update_cache_hit_ratio(endpoint):
-    """Update the cache hit ratio for an endpoint"""
-    hits = CACHE_HITS.labels(endpoint=endpoint)._value._value
-    misses = CACHE_MISSES.labels(endpoint=endpoint)._value._value
-    total = hits + misses
+def record_cache_refresh(endpoint):
+    """Record a cache refresh with time-based labels"""
+    time_labels = get_time_labels()
     
-    if total > 0:
-        ratio = hits / total
-        CACHE_HIT_RATIO.labels(endpoint=endpoint).set(ratio)
+    # Record the original refresh counter
+    CACHE_REFRESH.labels(endpoint=endpoint).inc()
+    
+    # Record refresh with time labels
+    CACHE_REFRESH_BY_TIME.labels(
+        endpoint=endpoint,
+        hour=time_labels["hour"],
+        day_of_week=time_labels["day_of_week"],
+        date=time_labels["date"]
+    ).inc()
+
+# Remove the problematic update_cache_hit_ratio function for now
+# We can calculate hit ratios in Grafana using the time-based counters

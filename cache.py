@@ -7,7 +7,7 @@ import json
 import pendulum
 
 from .config import config
-from .prometheus import CACHE_REFRESH
+from .prometheus import CACHE_REFRESH, record_cache_refresh
 from .util import (
     extract_base_endpoint,
     get_http_client,
@@ -236,7 +236,7 @@ class CacheManager:
                 await self.cache_response(cache_key, response, ttl)
 
                 base_endpoint = extract_base_endpoint(url)[0]
-                CACHE_REFRESH.labels(endpoint=base_endpoint).inc()
+                record_cache_refresh(base_endpoint)
                 logger.info(f"Successfully refreshed cache for {url}")
 
                 # Schedule next refresh

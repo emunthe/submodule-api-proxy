@@ -19,6 +19,7 @@ from .prometheus import (
     CACHE_MISSES,
     REQUEST_COUNT,
     REQUEST_LATENCY,
+    record_cache_request,
 )
 from .stats import StatsCollector
 from .token import TokenManager
@@ -38,7 +39,7 @@ logger = get_logger(__name__)
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 app = FastAPI(
-    title="NIF API Gateway 3",
+    title="NIF API Gateway",
     version="0.1",
     description="API Gateway for NIF API. This gateway is responsible for caching and logging requests to the external API.",
     openapi_url=f"{config.BASE_PATH}/openapi.json",
@@ -728,7 +729,8 @@ async def proxy(request: Request, path: str):
         cache_data = await cache_manager.get_cached_response(cache_key)
 
         if cache_data:
-            CACHE_HITS.labels(endpoint=base_endpoint).inc()
+            # Record cache hit with time-based metrics
+            record_cache_request(base_endpoint, hit=True)
 
             # handle autorefresh
             if autorefresh_until and not is_refresh:
@@ -747,7 +749,8 @@ async def proxy(request: Request, path: str):
                 headers={**headers, "X-Cache": "HIT"},
             )
 
-    CACHE_MISSES.labels(endpoint=base_endpoint).inc()
+    # Record cache miss with time-based metrics
+    record_cache_request(base_endpoint, hit=False)
 
     with REQUEST_LATENCY.labels(method=request.method, endpoint=base_endpoint).time():
         try:
