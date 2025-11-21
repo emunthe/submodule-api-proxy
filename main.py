@@ -41,7 +41,7 @@ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 app = FastAPI(
     title="NIF API Gateway",
-    version="0.1",
+    version="0.2",
     description="API Gateway for NIF API. This gateway is responsible for caching and logging requests to the external API.",
     openapi_url=f"{config.BASE_PATH}/openapi.json",
 )
