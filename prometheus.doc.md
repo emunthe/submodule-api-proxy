@@ -9,9 +9,10 @@ This document describes all Prometheus metrics exposed by the API Proxy service.
 3. [Time-Based Cache Metrics](#time-based-cache-metrics)
 4. [Cache Size Metrics](#cache-size-metrics)
 5. [Performance Metrics](#performance-metrics)
-6. [Helper Functions](#helper-functions)
-7. [Label Descriptions](#label-descriptions)
-8. [Usage Examples](#usage-examples)
+6. [Precache Metrics](#precache-metrics)
+7. [Helper Functions](#helper-functions)
+8. [Label Descriptions](#label-descriptions)
+9. [Usage Examples](#usage-examples)
 
 ---
 
@@ -186,6 +187,83 @@ These metrics include time labels for historical analysis and trend monitoring:
 
 ---
 
+## Precache Metrics
+
+The precache system periodically fetches season, tournament, match and team data, comparing it with cached versions to detect changes and trigger cache warming operations.
+
+### `precache_runs_total`
+
+-   **Type**: Counter
+-   **Description**: Total number of precache periodic runs
+-   **Labels**:
+    -   `status`: Run outcome ("success" or "error")
+-   **Use Cases**:
+    -   Monitor precache system health
+    -   Calculate success/failure rates
+    -   Set up alerting for failed runs
+    -   Track overall precache activity
+
+### `precache_changes_detected_total`
+
+-   **Type**: Counter
+-   **Description**: Total number of changes detected by data category
+-   **Labels**:
+    -   `category`: Data type ("seasons", "tournaments_in_season", "tournament_matches", "unique_team_ids")
+-   **Use Cases**:
+    -   Monitor data freshness and change frequency
+    -   Identify which data categories change most often
+    -   Track cache warming trigger events
+    -   Analyze data update patterns
+
+### `precache_api_calls_total`
+
+-   **Type**: Counter
+-   **Description**: Total API calls made during precache operations
+-   **Labels**:
+    -   `call_type`: Type of API call ("seasons", "tournaments", "matches")
+-   **Use Cases**:
+    -   Monitor external API usage
+    -   Track API rate limiting potential
+    -   Analyze cost implications of API calls
+    -   Optimize API call patterns
+
+### `precache_duration_seconds`
+
+-   **Type**: Histogram
+-   **Description**: Time spent in precache operations
+-   **Labels**: None
+-   **Buckets**: Standard histogram buckets for timing analysis
+-   **Use Cases**:
+    -   Monitor precache performance
+    -   Detect slow runs or performance degradation
+    -   Set SLA targets for precache operations
+    -   Optimize precache efficiency
+
+### `precache_last_run_timestamp`
+
+-   **Type**: Gauge
+-   **Description**: Unix timestamp of the last precache run completion
+-   **Labels**: None
+-   **Use Cases**:
+    -   Monitor if precache is running as expected
+    -   Alert when precache hasn't run recently
+    -   Track precache scheduling accuracy
+    -   Detect system issues preventing precache execution
+
+### `precache_items_processed`
+
+-   **Type**: Gauge
+-   **Description**: Number of items processed in the last precache run
+-   **Labels**:
+    -   `item_type`: Type of data processed ("seasons", "tournaments", "matches", "teams")
+-   **Use Cases**:
+    -   Monitor data volume trends
+    -   Detect unusual data volume changes
+    -   Capacity planning for data processing
+    -   Analyze seasonal data patterns
+
+---
+
 ## Performance Metrics
 
 ### `request_rate_per_second`
@@ -293,6 +371,13 @@ Returns a dictionary with current time labels:
 -   **`endpoint`**: Full API endpoint path (e.g., "/api/v1/ta/tournaments/123")
 -   **`has_id`**: String "true" or "false" indicating if endpoint contains an ID
 
+### Precache Labels
+
+-   **`status`**: Precache run outcome ("success" or "error")
+-   **`category`**: Data category for change detection ("seasons", "tournaments_in_season", "tournament_matches", "unique_team_ids")
+-   **`call_type`**: Type of API call during precache ("seasons", "tournaments", "matches")
+-   **`item_type`**: Type of data items processed ("seasons", "tournaments", "matches", "teams")
+
 ---
 
 ## Usage Examples
@@ -361,7 +446,55 @@ sum by (endpoint) (rate(cache_hits_total[5m])) /
 sum by (endpoint) (rate(cache_hits_total[5m]) + rate(cache_misses_total[5m])) * 100
 ```
 
-### Alerting Rules
+### Precache Queries
+
+**Precache Success Rate:**
+
+```promql
+rate(precache_runs_total{status="success"}[5m]) / rate(precache_runs_total[5m]) * 100
+```
+
+**Time Since Last Precache Run:**
+
+```promql
+time() - precache_last_run_timestamp
+```
+
+**Changes Detected Over Time:**
+
+```promql
+increase(precache_changes_detected_total[1h])
+```
+
+**Precache API Call Rate:**
+
+```promql
+rate(precache_api_calls_total[5m])
+```
+
+**Precache Duration Percentiles:**
+
+```promql
+histogram_quantile(0.95, rate(precache_duration_seconds_bucket[5m]))
+```
+
+**Data Volume by Type:**
+
+```promql
+precache_items_processed
+```
+
+**Most Active Data Categories (Changes):**
+
+```promql
+topk(5, increase(precache_changes_detected_total[24h]))
+```
+
+**Precache Performance Trends:**
+
+````promql
+rate(precache_duration_seconds_sum[5m]) / rate(precache_duration_seconds_count[5m])
+```### Alerting Rules
 
 **Low Cache Hit Rate:**
 
@@ -369,12 +502,12 @@ sum by (endpoint) (rate(cache_hits_total[5m]) + rate(cache_misses_total[5m])) * 
 - alert: LowCacheHitRate
   expr: |
       (
-        rate(cache_hits_total[5m]) / 
+        rate(cache_hits_total[5m]) /
         (rate(cache_hits_total[5m]) + rate(cache_misses_total[5m]))
       ) * 100 < 70
   labels:
       severity: warning
-```
+````
 
 **High Cache Size:**
 
@@ -392,6 +525,63 @@ sum by (endpoint) (rate(cache_hits_total[5m]) + rate(cache_misses_total[5m])) * 
   expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m])) > 2
   labels:
       severity: critical
+```
+
+### Precache Alerting Rules
+
+**Precache Not Running:**
+
+```yaml
+- alert: PrecacheNotRunning
+  expr: time() - precache_last_run_timestamp > 300
+  for: 5m
+  labels:
+      severity: warning
+  annotations:
+      summary: "Precache hasn't run recently"
+      description: 'Precache last ran {{ $value }} seconds ago'
+```
+
+**High Precache Failure Rate:**
+
+```yaml
+- alert: PrecacheHighFailureRate
+  expr: |
+      (
+        rate(precache_runs_total{status="error"}[10m]) / 
+        rate(precache_runs_total[10m])
+      ) * 100 > 50
+  for: 5m
+  labels:
+      severity: critical
+  annotations:
+      summary: 'High precache failure rate detected'
+      description: '{{ $value }}% of precache runs are failing'
+```
+
+**Slow Precache Performance:**
+
+```yaml
+- alert: SlowPrecachePerformance
+  expr: histogram_quantile(0.95, rate(precache_duration_seconds_bucket[5m])) > 120
+  for: 5m
+  labels:
+      severity: warning
+  annotations:
+      summary: 'Precache operations are slow'
+      description: '95th percentile precache duration is {{ $value }} seconds'
+```
+
+**No Data Changes Detected:**
+
+```yaml
+- alert: NoDataChangesDetected
+  expr: increase(precache_changes_detected_total[24h]) == 0
+  labels:
+      severity: info
+  annotations:
+      summary: 'No data changes detected in 24 hours'
+      description: "Precache hasn't detected any data changes in the last 24 hours"
 ```
 
 ---
@@ -431,9 +621,41 @@ This dual approach ensures both real-time accuracy for live monitoring and compr
 
 ## Dashboard Recommendations
 
-1. **Overview Dashboard**: Current cache size, hit rate, request volume
-2. **Performance Dashboard**: Request latency, endpoint performance, error rates
-3. **Trends Dashboard**: Daily/weekly patterns, growth trends, seasonal analysis
+1. **Overview Dashboard**: Current cache size, hit rate, request volume, precache health
+2. **Performance Dashboard**: Request latency, endpoint performance, error rates, precache duration
+3. **Trends Dashboard**: Daily/weekly patterns, growth trends, seasonal analysis, data change patterns
 4. **Detailed Analysis**: Per-endpoint metrics, cache efficiency, optimization opportunities
+5. **Precache Monitoring**: Precache success rates, data freshness, API usage, change detection patterns
+
+### Suggested Dashboard Panels
+
+**Main Overview:**
+
+-   Current cache size and hit rate
+-   Precache last run timestamp and success rate
+-   Request volume and error rates
+-   Active endpoints count
+
+**Precache Health:**
+
+-   Precache runs over time (success/failure)
+-   Time since last run
+-   Changes detected by category
+-   API calls by type
+-   Precache duration trends
+
+**Performance Monitoring:**
+
+-   Request latency percentiles
+-   Cache hit rate trends
+-   Precache performance metrics
+-   Error rate by endpoint
+
+**Data Insights:**
+
+-   Items processed by type
+-   Change detection patterns
+-   Weekly/daily usage patterns
+-   Top active endpoints
 
 This comprehensive metrics collection enables deep insights into API proxy performance, cache effectiveness, and usage patterns for optimal system operation and troubleshooting.
