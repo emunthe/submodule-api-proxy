@@ -281,42 +281,130 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
 
                 # -----------------------------------------------------------------
                 # Fetch tournaments per season
-                tournaments = []
-                # root_tournaments = []
-                # for season in valid_seasons:
-                #     season_id = season.get("seasonId")
-                #     url = f"{config.API_URL}/api/v1/ta/Tournament/Season/{season_id}/"
-                #     resp = await client.get(url, headers=headers, params={"hierarchy": True})
-                #     api_calls["tournaments"] += 1
-                #     PRECACHE_API_CALLS.labels(call_type="tournaments").inc()
-                #     if resp.status_code < 400:
-                #         data = resp.json().get("tournamentsInSeason", [])
-                #         for t in data:
-                #             t["apiPath"] = url
-                #             tournaments.append(t)
-                #             if not t.get("parentTournamentId"):
-                #                 root_tournaments.append(t)
-                #     await asyncio.sleep(0.2)
+                logger.info(f"Fetching tournaments for {len(valid_seasons)} seasons")
+                
+                # Skip tournament fetching if no valid seasons
+                if not valid_seasons:
+                    logger.info("No valid seasons found, skipping tournament fetching")
+                    tournaments = []
+                    root_tournaments = []
+                    api_calls["tournaments"] = 0
+                    PRECACHE_API_CALL_SUCCESS_RATE.labels(call_type="tournaments").set(100)
+                else:
+                    async def fetch_tournaments_for_season(season):
+                        """Fetch tournaments for a single season"""
+                        try:
+                            season_id = season.get("seasonId")
+                            if not season_id:
+                                logger.warning(f"Season missing seasonId: {season}")
+                                return {"tournaments": [], "root_tournaments": [], "success": False}
+                                
+                            url = f"{config.API_URL}/api/v1/ta/Tournament/Season/{season_id}/"
+                            logger.debug(f"Fetching tournaments for season {season_id}")
+                            
+                            resp = await client.get(url, headers=headers, params={"hierarchy": True})
+                            PRECACHE_API_CALLS.labels(call_type="tournaments").inc()
+                            
+                            if resp.status_code < 400:
+                                try:
+                                    data = resp.json().get("tournamentsInSeason", [])
+                                    tournaments_for_season = []
+                                    root_tournaments_for_season = []
+                                    
+                                    for t in data:
+                                        # Validate tournament structure
+                                        if not isinstance(t, dict) or not t.get("tournamentId"):
+                                            logger.debug(f"Skipping invalid tournament data: {t}")
+                                            continue
+                                            
+                                        t["apiPath"] = url
+                                        tournaments_for_season.append(t)
+                                        if not t.get("parentTournamentId"):
+                                            root_tournaments_for_season.append(t)
+                                    
+                                    return {
+                                        "tournaments": tournaments_for_season,
+                                        "root_tournaments": root_tournaments_for_season,
+                                        "success": True
+                                    }
+                                    
+                                except Exception as e:
+                                    logger.warning(f"Failed to parse tournaments response for season {season_id}: {e}")
+                                    return {"tournaments": [], "root_tournaments": [], "success": False}
+                            else:
+                                logger.warning(f"Tournaments API request failed for season {season_id}: {resp.status_code}")
+                                return {"tournaments": [], "root_tournaments": [], "success": False}
+                                
+                        except Exception as e:
+                            logger.error(f"Error fetching tournaments for season {season.get('seasonId', 'unknown')}: {e}")
+                            return {"tournaments": [], "root_tournaments": [], "success": False}
+                    
+                    # Create tasks for parallel execution
+                    tournament_tasks = [fetch_tournaments_for_season(season) for season in valid_seasons]
+                    total_tournament_calls = len(valid_seasons)
+                    successful_tournament_calls = 0
+                    
+                    tournaments = []
+                    root_tournaments = []
+                    
+                    # Execute requests in batches to avoid overwhelming the API
+                    batch_size = 3  # Smaller batch for tournaments since they can be larger responses
+                    
+                    for i in range(0, len(tournament_tasks), batch_size):
+                        batch = tournament_tasks[i:i + batch_size]
+                        results = await asyncio.gather(*batch, return_exceptions=True)
+                        
+                        # Process batch results
+                        for result in results:
+                            if isinstance(result, dict) and result.get("success"):
+                                tournaments.extend(result["tournaments"])
+                                root_tournaments.extend(result["root_tournaments"])
+                                successful_tournament_calls += 1
+                            elif isinstance(result, dict):
+                                # Failed but handled gracefully
+                                pass
+                            elif isinstance(result, Exception):
+                                logger.error(f"Tournament fetch task failed: {result}")
+                        
+                        # Small delay between batches
+                        if i + batch_size < len(tournament_tasks):
+                            await asyncio.sleep(0.1)
+                    
+                    # Update API call tracking
+                    api_calls["tournaments"] = total_tournament_calls
+                    if total_tournament_calls > 0:
+                        success_rate = (successful_tournament_calls / total_tournament_calls) * 100
+                        PRECACHE_API_CALL_SUCCESS_RATE.labels(call_type="tournaments").set(success_rate)
+                        logger.info(f"Tournaments API calls: {successful_tournament_calls}/{total_tournament_calls} successful ({success_rate:.1f}%)")
+                    
+                    logger.info(f"Fetched {len(tournaments)} tournaments ({len(root_tournaments)} root tournaments)")
 
                 # Update metrics for tournaments processed
                 PRECACHE_ITEMS_PROCESSED.labels(item_type="tournaments").set(len(tournaments))
+                PRECACHE_ITEMS_PROCESSED.labels(item_type="root_tournaments").set(len(root_tournaments))
 
-                # if json.dumps(tournaments, sort_keys=True) != json.dumps(
-                #     cached_tournaments or [], sort_keys=True
-                # ):
-                #     await redis_client.set(
-                #         "tournaments_in_season",
-                #         json.dumps(
-                #             {"data": tournaments, "last_updated": start_time.isoformat()},
-                #             ensure_ascii=False,
-                #         ),
-                #     )
-                #     cached_ids = {t["tournamentId"] for t in (cached_tournaments or [])}
-                #     new_ids = {t["tournamentId"] for t in tournaments}
-                #     changes_detected["tournaments_in_season"] = len(
-                #         new_ids.symmetric_difference(cached_ids)
-                #     )
-                #     PRECACHE_CHANGES_DETECTED.labels(category="tournaments_in_season").inc()
+                # Check for tournament changes and update cache if needed
+                if json.dumps(tournaments, sort_keys=True) != json.dumps(cached_tournaments or [], sort_keys=True):
+                    await redis_client.set(
+                        "tournaments_in_season",
+                        json.dumps(
+                            {"data": tournaments, "last_updated": start_time.isoformat()},
+                            ensure_ascii=False,
+                        ),
+                    )
+                    
+                    # Calculate which tournaments changed
+                    cached_ids = {t["tournamentId"] for t in (cached_tournaments or []) if "tournamentId" in t}
+                    new_ids = {t["tournamentId"] for t in tournaments if "tournamentId" in t}
+                    changed_tournament_ids = new_ids.symmetric_difference(cached_ids)
+                    
+                    changes_detected["tournaments_in_season"] = len(changed_tournament_ids)
+                    PRECACHE_CHANGES_DETECTED.labels(category="tournaments_in_season").inc()
+                    
+                    logger.info(f"Tournament changes detected: {len(changed_tournament_ids)} tournaments changed")
+                else:
+                    changed_tournament_ids = set()
+                    logger.debug("No tournament changes detected")
 
                 # -----------------------------------------------------------------
                 # Fetch tournament matches for root tournaments

@@ -255,7 +255,7 @@ The precache system periodically fetches season, tournament, match and team data
 -   **Type**: Gauge
 -   **Description**: Number of items processed in the last precache run
 -   **Labels**:
-    -   `item_type`: Type of data processed ("seasons", "valid_seasons", "tournaments", "matches", "teams")
+    -   `item_type`: Type of data processed ("seasons", "valid_seasons", "tournaments", "root_tournaments", "matches", "teams")
 -   **Use Cases**:
     -   Monitor data volume trends
     -   Detect unusual data volume changes
