@@ -283,11 +283,13 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                 # Fetch tournaments per season
                 logger.info(f"Fetching tournaments for {len(valid_seasons)} seasons")
                 
+                # Initialize tournaments lists
+                tournaments = []
+                root_tournaments = []
+                
                 # Skip tournament fetching if no valid seasons
                 if not valid_seasons:
                     logger.info("No valid seasons found, skipping tournament fetching")
-                    tournaments = []
-                    root_tournaments = []
                     api_calls["tournaments"] = 0
                     PRECACHE_API_CALL_SUCCESS_RATE.labels(call_type="tournaments").set(100)
                 else:
@@ -383,8 +385,10 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                 PRECACHE_ITEMS_PROCESSED.labels(item_type="tournaments").set(len(tournaments))
                 PRECACHE_ITEMS_PROCESSED.labels(item_type="root_tournaments").set(len(root_tournaments))
 
-                # Check for tournament changes and update cache if needed
-                if json.dumps(tournaments, sort_keys=True) != json.dumps(cached_tournaments or [], sort_keys=True):
+                # Always update cache for tournaments to ensure consistency
+                tournaments_changed = json.dumps(tournaments, sort_keys=True) != json.dumps(cached_tournaments or [], sort_keys=True)
+                
+                if tournaments_changed:
                     await redis_client.set(
                         "tournaments_in_season",
                         json.dumps(
@@ -402,9 +406,10 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                     PRECACHE_CHANGES_DETECTED.labels(category="tournaments_in_season").inc()
                     
                     logger.info(f"Tournament changes detected: {len(changed_tournament_ids)} tournaments changed")
+                    logger.info(f"Updated tournaments_in_season cache with {len(tournaments)} tournaments")
                 else:
                     changed_tournament_ids = set()
-                    logger.debug("No tournament changes detected")
+                    logger.debug(f"No tournament changes detected - cache has {len(cached_tournaments or [])} tournaments, fetched {len(tournaments)}")
 
                 # -----------------------------------------------------------------
                 # Fetch tournament matches for root tournaments
