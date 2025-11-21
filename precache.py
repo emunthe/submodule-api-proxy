@@ -358,8 +358,10 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                             debug_stats["parse_errors"] += 1
                             invalid_count += 1
                             logger.warning(f"Failed to parse season date for season {season.get('seasonId', 'unknown')}: Unable to parse '{season_date_from}' with any known format")
-                            logger.debug(f"Raw season date string: {repr(season_date_from)}")
+                            logger.debug(f"Raw season date string: {repr(season_date_from)} (type: {type(season_date_from)})")
                             continue
+                        else:
+                            logger.debug(f"Successfully parsed season {season.get('seasonId')} date '{season_date_from}' -> year {season_year}")
                             
                         sport_id = season.get("sportId")
                         
@@ -405,7 +407,12 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                 # Always update cache for valid_seasons to ensure consistency
                 valid_seasons_changed = json.dumps(valid_seasons, sort_keys=True) != json.dumps(cached_valid_seasons or [], sort_keys=True)
                 
-                if valid_seasons_changed:
+                # Force update for debugging if we have valid seasons but cache is empty
+                if len(valid_seasons) > 0 and (not cached_valid_seasons or len(cached_valid_seasons) == 0):
+                    logger.info(f"Forcing valid_seasons cache update: have {len(valid_seasons)} valid seasons but cache is empty")
+                    valid_seasons_changed = True
+                
+                if valid_seasons_changed or True:  # Temporarily always update for debugging
                     await redis_client.set(
                         "valid_seasons",
                         json.dumps(
@@ -416,6 +423,18 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                     changes_detected["valid_seasons"] = len(valid_seasons)
                     PRECACHE_CHANGES_DETECTED.labels(category="valid_seasons").inc()
                     logger.info(f"Valid seasons cache updated with {len(valid_seasons)} seasons (was {len(cached_valid_seasons or [])} seasons)")
+                    
+                    # Verify the data was stored
+                    verification = await redis_client.get("valid_seasons")
+                    if verification:
+                        try:
+                            parsed_verification = json.loads(verification)
+                            stored_count = len(parsed_verification.get("data", []))
+                            logger.info(f"VERIFICATION: Successfully stored {stored_count} valid seasons in Redis")
+                        except Exception as e:
+                            logger.error(f"VERIFICATION FAILED: Could not parse stored valid_seasons data: {e}")
+                    else:
+                        logger.error("VERIFICATION FAILED: No data found in Redis after attempted storage")
                 else:
                     logger.debug(f"No valid seasons changes detected - cache has {len(cached_valid_seasons or [])} seasons, fetched {len(valid_seasons)}")
 
