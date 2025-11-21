@@ -49,6 +49,35 @@ PRECACHE_ITEMS_PROCESSED = Gauge(
     ["item_type"]  # seasons, tournaments, matches, teams
 )
 
+PRECACHE_CACHED_DATA_SIZE = Gauge(
+    "precache_cached_data_size_bytes",
+    "Size in bytes of cached data",
+    ["data_type"]  # valid_seasons, tournaments_in_season, tournament_matches, unique_team_ids
+)
+
+
+async def _update_cached_data_size_metrics(redis_client):
+    """Update metrics for the size of cached data"""
+    try:
+        cache_keys = {
+            "valid_seasons": "valid_seasons",
+            "tournaments_in_season": "tournaments_in_season", 
+            "tournament_matches": "tournament_matches",
+            "unique_team_ids": "unique_team_ids"
+        }
+        
+        for data_type, redis_key in cache_keys.items():
+            raw_data = await redis_client.get(redis_key)
+            if raw_data:
+                # Calculate size in bytes
+                size_bytes = len(raw_data.encode('utf-8') if isinstance(raw_data, str) else raw_data)
+                PRECACHE_CACHED_DATA_SIZE.labels(data_type=data_type).set(size_bytes)
+            else:
+                # Set to 0 if no data exists
+                PRECACHE_CACHED_DATA_SIZE.labels(data_type=data_type).set(0)
+    except Exception as e:
+        logger.error(f"Error updating cached data size metrics: {e}")
+
 
 async def detect_change_tournaments_and_matches(cache_manager, token_manager):
     """Periodically fetch season, tournament, match and team data.
@@ -87,6 +116,9 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                 cached_tournaments = await _get_cached("tournaments_in_season")
                 cached_matches = await _get_cached("tournament_matches")
                 cached_team_ids = await _get_cached("unique_team_ids") or []
+
+                # Update cached data size metrics
+                await _update_cached_data_size_metrics(redis_client)
 
                 token = await token_manager.get_token()
                 headers = {"Authorization": f"Bearer {token['access_token']}"}
@@ -332,6 +364,9 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                 # Record successful run
                 PRECACHE_RUNS_TOTAL.labels(status="success").inc()
                 PRECACHE_LAST_RUN_TIMESTAMP.set(start_time.timestamp())
+
+                # Update cached data size metrics after potential data updates
+                await _update_cached_data_size_metrics(redis_client)
 
                 end_time = pendulum.now()
                 log_item = {

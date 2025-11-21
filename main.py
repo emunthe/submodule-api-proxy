@@ -14,7 +14,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from .cache import CacheManager
 from .config import config
-from .precache import detect_change_tournaments_and_matches, get_tournaments_and_matches
+from .precache import detect_change_tournaments_and_matches
 from .prometheus import (
     CACHE_HITS,
     CACHE_MISSES,
@@ -42,7 +42,7 @@ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 app = FastAPI(
     title="NIF API Gateway",
-    version="0.2",
+    version="0.1.2",
     description="API Gateway for NIF API. This gateway is responsible for caching and logging requests to the external API.",
     openapi_url=f"{config.BASE_PATH}/openapi.json",
 )
@@ -164,38 +164,6 @@ async def clear_cache(path: str):
 )
 async def clear_all_cache():
     return await cache_manager.clear_all_cache()
-
-
-@app.get(
-    "/get_all_stored_data",
-    summary="Get cached season/tournament data",
-    tags=["Cache"],
-)
-async def get_all_stored_data():
-    redis_client = get_redis_client()
-    try:
-        async def _get_cached(key: str):
-            raw = await redis_client.get(key)
-            if not raw:
-                return None
-            try:
-                return json.loads(raw).get("data")
-            except Exception:
-                return None
-
-        cached_valid_seasons = await _get_cached("valid_seasons")
-        cached_tournaments = await _get_cached("tournaments_in_season")
-        cached_matches = await _get_cached("tournament_matches")
-        cached_team_ids = await _get_cached("unique_team_ids") or []
-
-        return {
-            "valid_seasons": cached_valid_seasons,
-            "tournaments_in_season": cached_tournaments,
-            "tournament_matches": cached_matches,
-            "unique_team_ids": cached_team_ids,
-        }
-    finally:
-        await redis_client.close()
 
 
 @app.get(
@@ -345,28 +313,6 @@ async def trigger_refresh():
             await redis_client.close()
         if client:
             await client.aclose()
-
-
-@app.get(
-    "/get_tournaments_and_matches",
-    summary="Get tournaments and matches",
-    description="Fetch tournaments and scheduled matches data from the external API and cache the result.",
-    tags=["Tournament"],
-)
-async def get_tournaments_and_matches_endpoint():
-    """Get tournaments and scheduled matches"""
-    base_endpoint = "/get_tournaments_and_matches"
-    REQUEST_COUNT.labels(method="GET", endpoint=base_endpoint, has_id="False").inc()
-
-    with REQUEST_LATENCY.labels(method="GET", endpoint=base_endpoint).time():
-        result = await get_tournaments_and_matches(token_manager)
-        
-        return Response(
-            content=result["content"],
-            status_code=result["status_code"],
-            media_type="application/json",
-            headers=result["headers"]
-        )
 
 
 @app.get(

@@ -262,6 +262,19 @@ The precache system periodically fetches season, tournament, match and team data
     -   Capacity planning for data processing
     -   Analyze seasonal data patterns
 
+### `precache_cached_data_size_bytes`
+
+-   **Type**: Gauge
+-   **Description**: Size in bytes of cached precache data by data type
+-   **Labels**:
+    -   `data_type`: Type of cached data ("valid_seasons", "tournaments_in_season", "tournament_matches", "unique_team_ids")
+-   **Use Cases**:
+    -   Monitor memory usage of cached precache data
+    -   Track data growth over time
+    -   Identify which data types consume most storage
+    -   Capacity planning for cache storage
+    -   Detect data bloat or unusual size changes
+
 ---
 
 ## Performance Metrics
@@ -484,6 +497,24 @@ histogram_quantile(0.95, rate(precache_duration_seconds_bucket[5m]))
 precache_items_processed
 ```
 
+**Cached Data Size by Type:**
+
+```promql
+precache_cached_data_size_bytes
+```
+
+**Largest Cached Data Types:**
+
+```promql
+topk(5, precache_cached_data_size_bytes)
+```
+
+**Total Cached Data Size:**
+
+```promql
+sum(precache_cached_data_size_bytes)
+```
+
 **Most Active Data Categories (Changes):**
 
 ```promql
@@ -572,6 +603,32 @@ rate(precache_duration_seconds_sum[5m]) / rate(precache_duration_seconds_count[5
       description: '95th percentile precache duration is {{ $value }} seconds'
 ```
 
+**Large Cached Data Size:**
+
+```yaml
+- alert: LargeCachedDataSize
+  expr: precache_cached_data_size_bytes > 10000000 # 10MB
+  for: 10m
+  labels:
+      severity: warning
+  annotations:
+      summary: 'Cached data size is large'
+      description: 'Cached data type {{ $labels.data_type }} is {{ $value | humanize1024 }}B in size'
+```
+
+**Excessive Total Cached Data Size:**
+
+```yaml
+- alert: ExcessiveTotalCachedDataSize
+  expr: sum(precache_cached_data_size_bytes) > 50000000 # 50MB
+  for: 10m
+  labels:
+      severity: critical
+  annotations:
+      summary: 'Total cached data size is excessive'
+      description: 'Total cached data size is {{ $value | humanize1024 }}B'
+```
+
 **No Data Changes Detected:**
 
 ```yaml
@@ -643,6 +700,7 @@ This dual approach ensures both real-time accuracy for live monitoring and compr
 -   Changes detected by category
 -   API calls by type
 -   Precache duration trends
+-   Cached data size by type
 
 **Performance Monitoring:**
 
