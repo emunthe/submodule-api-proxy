@@ -20,6 +20,7 @@ from .prometheus import (
     REQUEST_COUNT,
     REQUEST_LATENCY,
     record_cache_request,
+    update_cache_size_metrics,
 )
 from .stats import StatsCollector
 from .token import TokenManager
@@ -60,6 +61,37 @@ app.add_middleware(
 token_manager = TokenManager()
 cache_manager = CacheManager(token_manager)
 stats_collector = StatsCollector()
+
+
+async def update_cache_metrics_periodically():
+    """Periodically update cache size metrics"""
+    while True:
+        try:
+            # Wait 60 seconds between updates
+            await asyncio.sleep(60)
+            
+            # Get cache information
+            redis_client = get_redis_client()
+            keys = await redis_client.keys("GET:*")
+            
+            # Count total items and unique endpoints
+            total_items = len(keys)
+            unique_endpoints = set()
+            
+            for key in keys:
+                key_str = key.decode("utf-8") if isinstance(key, bytes) else key
+                endpoint = key_str.replace("GET:", "")
+                unique_endpoints.add(endpoint)
+            
+            # Update metrics
+            update_cache_size_metrics(total_items, len(unique_endpoints))
+            
+            await redis_client.close()
+            
+        except Exception as e:
+            logger.error(f"Error updating cache metrics: {e}")
+            # Continue the loop even if there's an error
+            continue
 
 
 async def detect_change_tournaments_and_matches():
@@ -347,6 +379,11 @@ async def startup_event():
     task = asyncio.create_task(detect_change_tournaments_and_matches())
     background_tasks.add(task)
     task.add_done_callback(background_tasks.discard)
+    
+    # Start cache metrics update task
+    cache_metrics_task = asyncio.create_task(update_cache_metrics_periodically())
+    background_tasks.add(cache_metrics_task)
+    cache_metrics_task.add_done_callback(background_tasks.discard)
 
 
 @app.middleware("http")

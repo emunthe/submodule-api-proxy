@@ -7,7 +7,7 @@ import json
 import pendulum
 
 from .config import config
-from .prometheus import CACHE_REFRESH, record_cache_refresh
+from .prometheus import CACHE_REFRESH, record_cache_refresh, update_cache_size_metrics
 from .util import (
     extract_base_endpoint,
     get_http_client,
@@ -106,6 +106,12 @@ class CacheManager:
             cache_info.append(cache_entry)
 
         await redis.close()
+        
+        # Update cache size metrics
+        total_items = len(cache_info)
+        unique_endpoints = len(set(entry["endpoint"] for entry in cache_info))
+        update_cache_size_metrics(total_items, unique_endpoints)
+        
         return sorted(cache_info, key=lambda x: x["endpoint"])
 
     async def clear_cache(self, path):

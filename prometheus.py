@@ -42,6 +42,19 @@ CACHE_REFRESH_BY_TIME = Counter(
     ["endpoint", "hour", "day_of_week", "date"]
 )
 
+# Cache size metrics with time labels
+CACHE_ITEMS_BY_TIME = Gauge(
+    "cache_items_by_time",
+    "Number of cached items with time labels",
+    ["hour", "day_of_week", "date"]
+)
+
+CACHE_ENDPOINTS_BY_TIME = Gauge(
+    "cache_endpoints_by_time", 
+    "Number of unique cached endpoints with time labels",
+    ["hour", "day_of_week", "date"]
+)
+
 # Current cache size and status
 CACHE_SIZE = Gauge("cache_size", "Number of items currently in cache")
 CACHE_MEMORY_USAGE = Gauge("cache_memory_usage_bytes", "Cache memory usage in bytes")
@@ -108,6 +121,26 @@ def record_cache_refresh(endpoint):
         day_of_week=time_labels["day_of_week"],
         date=time_labels["date"]
     ).inc()
+
+def update_cache_size_metrics(total_items, unique_endpoints):
+    """Update cache size metrics with current counts and time labels"""
+    time_labels = get_time_labels()
+    
+    # Update current cache size (without time labels)
+    CACHE_SIZE.set(total_items)
+    
+    # Update time-based cache metrics
+    CACHE_ITEMS_BY_TIME.labels(
+        hour=time_labels["hour"],
+        day_of_week=time_labels["day_of_week"], 
+        date=time_labels["date"]
+    ).set(total_items)
+    
+    CACHE_ENDPOINTS_BY_TIME.labels(
+        hour=time_labels["hour"],
+        day_of_week=time_labels["day_of_week"],
+        date=time_labels["date"]
+    ).set(unique_endpoints)
 
 # Remove the problematic update_cache_hit_ratio function for now
 # We can calculate hit ratios in Grafana using the time-based counters
