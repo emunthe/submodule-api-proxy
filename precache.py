@@ -306,20 +306,51 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                         continue
                         
                     try:
-                        # Parse season date
+                        # Parse season date - handle multiple formats
                         season_date_from = season.get("seasonDateFrom")
                         if not season_date_from:
                             debug_stats["missing_date"] += 1
                             invalid_count += 1
                             logger.debug(f"Season {season.get('seasonId', 'unknown')} missing seasonDateFrom")
                             continue
+                        
+                        # Try different date formats that the API might return
+                        season_year = None
+                        date_formats_to_try = [
+                            "%m/%d/%Y %H:%M:%S",  # MM/DD/YYYY HH:MM:SS (what we're seeing in logs)
+                            "%Y-%m-%d %H:%M:%S",  # YYYY-MM-DD HH:MM:SS  
+                            "%Y-%m-%dT%H:%M:%S",  # ISO format with T
+                            "%Y-%m-%d",           # YYYY-MM-DD
+                            "%m/%d/%Y"            # MM/DD/YYYY
+                        ]
+                        
+                        for date_format in date_formats_to_try:
+                            try:
+                                parsed_date = pendulum.from_format(season_date_from, date_format)
+                                season_year = parsed_date.year
+                                break
+                            except (ValueError, TypeError):
+                                continue
+                        
+                        # If none of the formats worked, try pendulum.parse as fallback
+                        if season_year is None:
+                            try:
+                                parsed_date = pendulum.parse(season_date_from)
+                                season_year = parsed_date.year
+                            except (ValueError, TypeError):
+                                pass
+                        
+                        if season_year is None:
+                            debug_stats["parse_errors"] += 1
+                            invalid_count += 1
+                            logger.warning(f"Failed to parse season date for season {season.get('seasonId', 'unknown')}: Unable to parse '{season_date_from}' with any known format")
+                            continue
                             
-                        season_year = pendulum.parse(season_date_from).year
                         sport_id = season.get("sportId")
                         
                         # Log sample of seasons for debugging
                         if debug_stats["total_processed"] <= 5:
-                            logger.info(f"Sample season: ID={season.get('seasonId')}, year={season_year}, sport={sport_id}, name='{season.get('seasonName', '')}'")
+                            logger.info(f"Sample season: ID={season.get('seasonId')}, year={season_year}, sport={sport_id}, name='{season.get('seasonName', '')}', dateFrom='{season_date_from}'")
                         
                         # Apply filtering criteria
                         if season_year >= 2024:
@@ -342,10 +373,10 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                             debug_stats["invalid_year"] += 1
                             logger.debug(f"Excluded season due to year < 2024: {season.get('seasonName')} (year: {season_year})")
                                     
-                    except (ValueError, TypeError, KeyError) as e:
+                    except Exception as e:
                         # Log parsing errors but continue processing
                         debug_stats["parse_errors"] += 1
-                        logger.warning(f"Failed to parse season date for season {season.get('seasonId', 'unknown')}: {e} - seasonDateFrom: '{season.get('seasonDateFrom')}'")
+                        logger.warning(f"Unexpected error parsing season {season.get('seasonId', 'unknown')}: {e} - data: {season}")
                         invalid_count += 1
                         continue
 
