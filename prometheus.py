@@ -142,5 +142,18 @@ def update_cache_size_metrics(total_items, unique_endpoints):
         date=time_labels["date"]
     ).set(unique_endpoints)
 
+async def update_current_cache_size():
+    """Update just the current cache size efficiently (for real-time updates)"""
+    try:
+        from .util import get_redis_client
+        redis_client = get_redis_client()
+        keys = await redis_client.keys("GET:*")
+        total_items = len(keys)
+        CACHE_SIZE.set(total_items)
+        await redis_client.close()
+    except Exception:
+        # If we can't update, just continue - periodic update will catch it
+        pass
+
 # Remove the problematic update_cache_hit_ratio function for now
 # We can calculate hit ratios in Grafana using the time-based counters

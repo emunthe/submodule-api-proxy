@@ -7,7 +7,7 @@ import json
 import pendulum
 
 from .config import config
-from .prometheus import CACHE_REFRESH, record_cache_refresh, update_cache_size_metrics
+from .prometheus import CACHE_REFRESH, record_cache_refresh, update_cache_size_metrics, CACHE_SIZE, update_current_cache_size
 from .util import (
     extract_base_endpoint,
     get_http_client,
@@ -76,6 +76,10 @@ class CacheManager:
             redis = get_redis_client()
             await redis.setex(cache_key, ttl, json.dumps(cache_data))
             await redis.close()
+            
+            # Update cache size in real-time
+            await update_current_cache_size()
+            
             return True
         return False
 
@@ -131,6 +135,10 @@ class CacheManager:
         logger.info(f"Cleared cache for {path}")
 
         await redis.close()
+        
+        # Update cache size in real-time
+        await update_current_cache_size()
+        
         return {"cleared": bool(results[0]), "message": f"Cache cleared for {path}"}
 
     async def clear_all_cache(self):
@@ -155,6 +163,9 @@ class CacheManager:
         )
 
         await redis.close()
+        
+        # Update cache size in real-time (should be 0 after clearing all)
+        await update_current_cache_size()
 
         return {
             "message": f"Cleared {len(keys)} cache entries and {len(refresh_keys)} refresh tasks"
