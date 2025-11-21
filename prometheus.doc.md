@@ -162,12 +162,16 @@ These metrics include time labels for historical analysis and trend monitoring:
 ### `cache_size`
 
 -   **Type**: Gauge
--   **Description**: Current number of items in cache (real-time metric)
+-   **Description**: Current number of items in cache (real-time metric with live updates)
 -   **Labels**: None
+-   **Update Triggers**:
+    -   Real-time updates on cache operations (cache_response, clear_cache, clear_all_cache)
+    -   Background updates every 60 seconds
 -   **Use Cases**:
     -   Real-time cache monitoring
     -   Alerting on cache size
     -   Memory management
+    -   Live dashboard displays
 
 ### `cache_memory_usage_bytes`
 
@@ -241,7 +245,7 @@ Returns a dictionary with current time labels:
 
 ### `update_cache_size_metrics(total_items, unique_endpoints)`
 
-**Purpose**: Update cache size metrics with current state
+**Purpose**: Update cache size metrics with current state and time labels
 
 **Parameters**:
 
@@ -253,6 +257,25 @@ Returns a dictionary with current time labels:
 -   Updates `cache_size`
 -   Updates `cache_items` with time labels
 -   Updates `cache_endpoints` with time labels
+
+### `update_current_cache_size()`
+
+**Purpose**: Efficiently update just the current cache size for real-time accuracy
+
+**Parameters**: None (async function)
+
+**Actions**:
+
+-   Queries Redis for current cache keys count
+-   Updates `cache_size` metric immediately
+-   Used for real-time updates during cache operations
+-   Graceful error handling if Redis unavailable
+
+**Usage**: Called automatically in:
+
+-   `cache_response()` - when new items are cached
+-   `clear_cache()` - when individual cache entries are removed
+-   `clear_all_cache()` - when all cache is cleared
 
 ---
 
@@ -307,10 +330,35 @@ sum by (day_of_week) (rate(cache_requests_by_time_total[7d]))
 cache_items
 ```
 
+**Real-Time Current Cache Size:**
+
+```promql
+cache_size
+```
+
+**Cache Growth Rate:**
+
+```promql
+rate(cache_items[5m])
+```
+
 **Request Latency by Endpoint:**
 
 ```promql
 histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m]))
+```
+
+**Top 20 Most Active Endpoints (24h):**
+
+```promql
+topk(20, sum by (endpoint) (rate(cache_requests_by_time_total[24h])))
+```
+
+**Cache Efficiency by Endpoint:**
+
+```promql
+sum by (endpoint) (rate(cache_hits_total[5m])) /
+sum by (endpoint) (rate(cache_hits_total[5m]) + rate(cache_misses_total[5m])) * 100
 ```
 
 ### Alerting Rules
@@ -351,9 +399,35 @@ histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m]))
 ## Metric Collection Frequency
 
 -   **Time-based metrics**: Updated on every request with current time labels
--   **Cache size metrics**: Updated every 60 seconds via background task
+-   **Cache size metrics**:
+    -   Real-time updates: Immediately when cache operations occur (cache_response, clear_cache, clear_all_cache)
+    -   Background updates: Every 60 seconds via background task for comprehensive metrics
 -   **Basic counters**: Updated in real-time on each request
 -   **Request latency**: Measured for each request
+
+## Cache Operations Integration
+
+### Real-Time Cache Size Updates
+
+The `cache_size` metric is updated immediately when cache operations occur:
+
+**Cache Response Operations** (`cache_response()`):
+
+1. Store response in Redis cache
+2. Call `update_current_cache_size()` for immediate cache size update
+
+**Cache Clearing Operations** (`clear_cache()`, `clear_all_cache()`):
+
+1. Remove entries from Redis cache
+2. Call `update_current_cache_size()` for immediate cache size update
+
+**Background Sync**:
+
+-   Periodic 60-second updates via `update_cache_size_metrics()`
+-   Updates both current metrics and time-based historical metrics
+-   Provides fallback accuracy if real-time updates fail
+
+This dual approach ensures both real-time accuracy for live monitoring and comprehensive historical data for trend analysis.
 
 ## Dashboard Recommendations
 
