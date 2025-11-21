@@ -10,9 +10,10 @@ This document describes all Prometheus metrics exposed by the API Proxy service.
 4. [Cache Size Metrics](#cache-size-metrics)
 5. [Performance Metrics](#performance-metrics)
 6. [Precache Metrics](#precache-metrics)
-7. [Helper Functions](#helper-functions)
-8. [Label Descriptions](#label-descriptions)
-9. [Usage Examples](#usage-examples)
+7. [Precache Data Management](#precache-data-management)
+8. [Helper Functions](#helper-functions)
+9. [Label Descriptions](#label-descriptions)
+10. [Usage Examples](#usage-examples)
 
 ---
 
@@ -249,6 +250,9 @@ The precache system periodically fetches season, tournament, match and team data
     -   Alert when precache hasn't run recently
     -   Track precache scheduling accuracy
     -   Detect system issues preventing precache execution
+-   **Special Behaviors**:
+    -   Set to 0 when precache data is manually cleared via `/precache` endpoint
+    -   Updated to current timestamp on successful precache run completion
 
 ### `precache_items_processed`
 
@@ -274,6 +278,9 @@ The precache system periodically fetches season, tournament, match and team data
     -   Identify which data types consume most storage
     -   Capacity planning for cache storage
     -   Detect data bloat or unusual size changes
+-   **Special Behaviors**:
+    -   Automatically updated to 0 for all data types when precache data is cleared via `/precache` endpoint
+    -   Updated after each successful precache run with actual data sizes
 
 ### `precache_api_call_success_rate`
 
@@ -287,6 +294,41 @@ The precache system periodically fetches season, tournament, match and team data
     -   Track overall precache health
     -   Set up alerting for low success rates
     -   Optimize retry strategies
+
+---
+
+## Precache Data Management
+
+### Manual Precache Data Clearing
+
+The API proxy provides an endpoint for manually clearing all precache data:
+
+**Endpoint**: `DELETE /precache`
+
+**Purpose**: Clear all precache data from Redis cache and reset related metrics
+
+**Response**:
+
+```json
+{
+    "status": "success",
+    "message": "Cleared 4 precache data keys",
+    "cleared_keys": ["valid_seasons", "tournaments_in_season", "tournament_matches", "unique_team_ids"]
+}
+```
+
+**Metric Effects**:
+
+-   `precache_cached_data_size_bytes` → Set to 0 for all data types
+-   `precache_last_run_timestamp` → Reset to 0
+-   All other precache metrics remain unchanged (preserve historical data)
+
+**Use Cases**:
+
+-   Force complete precache rebuild
+-   Clear corrupted or stale precache data
+-   Reset precache state for testing
+-   Manual intervention when automatic precache fails
 
 ---
 
@@ -540,6 +582,22 @@ precache_api_call_success_rate
 precache_api_call_success_rate < 90
 ```
 
+**Data Changes Over Time (Including Clears):**
+
+```promql
+changes(precache_last_run_timestamp[1h])
+```
+
+**Time Since Precache Clear or Run:**
+
+```promql
+# Returns time since last precache activity (run or manual clear)
+time() - on() group_left() (
+  max(precache_last_run_timestamp) or
+  vector(time() - 86400)  # Default to 24h ago if never run
+)
+```
+
 **Most Active Data Categories (Changes):**
 
 ```promql
@@ -667,6 +725,18 @@ rate(precache_duration_seconds_sum[5m]) / rate(precache_duration_seconds_count[5
       description: 'Precache {{ $labels.call_type }} API calls have {{ $value }}% success rate'
 ```
 
+**Precache Data Manually Cleared:**
+
+```yaml
+- alert: PrecacheDataCleared
+  expr: precache_last_run_timestamp == 0 and changes(precache_last_run_timestamp[5m]) != 0
+  labels:
+      severity: info
+  annotations:
+      summary: 'Precache data was manually cleared'
+      description: 'Precache last run timestamp was reset to 0, indicating manual data clearing'
+```
+
 **No Data Changes Detected:**
 
 ```yaml
@@ -739,6 +809,7 @@ This dual approach ensures both real-time accuracy for live monitoring and compr
 -   API calls by type
 -   Precache duration trends
 -   Cached data size by type
+-   Manual clear events and recovery status
 
 **Performance Monitoring:**
 

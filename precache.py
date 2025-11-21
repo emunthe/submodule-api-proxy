@@ -269,12 +269,38 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
 
                 # log the final seasons fetched
                 logger.info(f"Total seasons fetched: {len(seasons)}")
+                
+                if len(seasons) == 0:
+                    logger.warning("No seasons were fetched from any API calls - this may indicate API issues or no data available")
+                elif len(seasons) < 5:
+                    logger.warning(f"Very few seasons fetched ({len(seasons)}) - this may indicate API issues")
+                    # Log all seasons when we have very few
+                    for i, season in enumerate(seasons):
+                        logger.info(f"Season {i+1}: {season}")
+                else:
+                    # Log a sample of seasons when we have many
+                    logger.info(f"Sample of fetched seasons (first 3):")
+                    for i in range(min(3, len(seasons))):
+                        season = seasons[i]
+                        logger.info(f"Season {i+1}: ID={season.get('seasonId')}, name='{season.get('seasonName')}', sport={season.get('sportId')}, dateFrom={season.get('seasonDateFrom')}")
 
                 # Filter seasons to get valid ones with improved logic
                 valid_seasons = []
                 invalid_count = 0
+                debug_stats = {
+                    "total_processed": 0,
+                    "missing_date": 0,
+                    "invalid_year": 0,
+                    "bedrift_excluded": 0,
+                    "parse_errors": 0,
+                    "valid_added": 0
+                }
+                
+                logger.info(f"Starting season filtering on {len(seasons)} total seasons")
                 
                 for season in seasons:
+                    debug_stats["total_processed"] += 1
+                    
                     if not isinstance(season, dict):
                         invalid_count += 1
                         continue
@@ -283,37 +309,57 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                         # Parse season date
                         season_date_from = season.get("seasonDateFrom")
                         if not season_date_from:
+                            debug_stats["missing_date"] += 1
                             invalid_count += 1
+                            logger.debug(f"Season {season.get('seasonId', 'unknown')} missing seasonDateFrom")
                             continue
                             
                         season_year = pendulum.parse(season_date_from).year
                         sport_id = season.get("sportId")
+                        
+                        # Log sample of seasons for debugging
+                        if debug_stats["total_processed"] <= 5:
+                            logger.info(f"Sample season: ID={season.get('seasonId')}, year={season_year}, sport={sport_id}, name='{season.get('seasonName', '')}'")
                         
                         # Apply filtering criteria
                         if season_year >= 2024:
                             if sport_id != 72:
                                 # Include all non-bandy sports from 2024+
                                 valid_seasons.append(season)
+                                debug_stats["valid_added"] += 1
+                                logger.debug(f"Added non-bandy season: {season.get('seasonName')} (year: {season_year}, sport: {sport_id})")
                             else:
                                 # For bandy (sport_id 72), exclude "bedrift" (company) leagues
                                 season_name = season.get("seasonName", "").lower()
                                 if "bedrift" not in season_name:
                                     valid_seasons.append(season)
+                                    debug_stats["valid_added"] += 1
+                                    logger.debug(f"Added bandy season: {season.get('seasonName')} (year: {season_year})")
+                                else:
+                                    debug_stats["bedrift_excluded"] += 1
+                                    logger.debug(f"Excluded bedrift season: {season.get('seasonName')}")
+                        else:
+                            debug_stats["invalid_year"] += 1
+                            logger.debug(f"Excluded season due to year < 2024: {season.get('seasonName')} (year: {season_year})")
                                     
                     except (ValueError, TypeError, KeyError) as e:
                         # Log parsing errors but continue processing
-                        logger.debug(f"Failed to parse season date for season {season.get('seasonId', 'unknown')}: {e}")
+                        debug_stats["parse_errors"] += 1
+                        logger.warning(f"Failed to parse season date for season {season.get('seasonId', 'unknown')}: {e} - seasonDateFrom: '{season.get('seasonDateFrom')}'")
                         invalid_count += 1
                         continue
 
+                logger.info(f"Season filtering complete - Debug stats: {debug_stats}")
                 logger.info(f"Filtered to {len(valid_seasons)} valid seasons (skipped {invalid_count} invalid)")
 
                 # Update metrics for items processed (both total and filtered)
                 PRECACHE_ITEMS_PROCESSED.labels(item_type="seasons").set(len(seasons))
                 PRECACHE_ITEMS_PROCESSED.labels(item_type="valid_seasons").set(len(valid_seasons))
 
-                # Check if filtered valid_seasons have changed and update if needed
-                if json.dumps(valid_seasons, sort_keys=True) != json.dumps(cached_valid_seasons or [], sort_keys=True):
+                # Always update cache for valid_seasons to ensure consistency
+                valid_seasons_changed = json.dumps(valid_seasons, sort_keys=True) != json.dumps(cached_valid_seasons or [], sort_keys=True)
+                
+                if valid_seasons_changed:
                     await redis_client.set(
                         "valid_seasons",
                         json.dumps(
@@ -323,6 +369,17 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                     )
                     changes_detected["valid_seasons"] = len(valid_seasons)
                     PRECACHE_CHANGES_DETECTED.labels(category="valid_seasons").inc()
+                    logger.info(f"Valid seasons cache updated with {len(valid_seasons)} seasons (was {len(cached_valid_seasons or [])} seasons)")
+                else:
+                    logger.debug(f"No valid seasons changes detected - cache has {len(cached_valid_seasons or [])} seasons, fetched {len(valid_seasons)}")
+
+                # Log the final result for debugging
+                if len(valid_seasons) == 0:
+                    logger.warning("ALERT: No valid seasons after filtering! This will result in empty tournaments_in_season data.")
+                    logger.info(f"Filtering criteria: year >= 2024, exclude bandy 'bedrift' leagues")
+                    logger.info(f"Debug stats from filtering: {debug_stats}")
+                else:
+                    logger.info(f"Successfully filtered {len(valid_seasons)} valid seasons for tournament fetching")
 
                 # -----------------------------------------------------------------
                 # Fetch tournaments per season
