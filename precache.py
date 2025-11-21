@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+from datetime import datetime
 
 import pendulum
 from prometheus_client import Counter, Gauge, Histogram
@@ -326,24 +327,38 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                         
                         for date_format in date_formats_to_try:
                             try:
+                                # Try pendulum first if available
                                 parsed_date = pendulum.from_format(season_date_from, date_format)
                                 season_year = parsed_date.year
+                                logger.debug(f"Successfully parsed date '{season_date_from}' using pendulum format '{date_format}' -> year {season_year}")
                                 break
-                            except (ValueError, TypeError):
-                                continue
+                            except (ValueError, TypeError) as e:
+                                logger.debug(f"Pendulum failed for '{season_date_from}' with format '{date_format}': {e}")
+                                # Try datetime as fallback
+                                try:
+                                    parsed_date = datetime.strptime(season_date_from, date_format)
+                                    season_year = parsed_date.year
+                                    logger.debug(f"Successfully parsed date '{season_date_from}' using datetime format '{date_format}' -> year {season_year}")
+                                    break
+                                except (ValueError, TypeError) as e2:
+                                    logger.debug(f"Datetime also failed for '{season_date_from}' with format '{date_format}': {e2}")
+                                    continue
                         
                         # If none of the formats worked, try pendulum.parse as fallback
                         if season_year is None:
                             try:
                                 parsed_date = pendulum.parse(season_date_from)
                                 season_year = parsed_date.year
-                            except (ValueError, TypeError):
+                                logger.debug(f"Successfully parsed date '{season_date_from}' using pendulum.parse fallback -> year {season_year}")
+                            except (ValueError, TypeError, NameError) as e:
+                                logger.debug(f"pendulum.parse fallback also failed for '{season_date_from}': {e}")
                                 pass
                         
                         if season_year is None:
                             debug_stats["parse_errors"] += 1
                             invalid_count += 1
                             logger.warning(f"Failed to parse season date for season {season.get('seasonId', 'unknown')}: Unable to parse '{season_date_from}' with any known format")
+                            logger.debug(f"Raw season date string: {repr(season_date_from)}")
                             continue
                             
                         sport_id = season.get("sportId")
