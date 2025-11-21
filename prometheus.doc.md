@@ -208,7 +208,7 @@ The precache system periodically fetches season, tournament, match and team data
 -   **Type**: Counter
 -   **Description**: Total number of changes detected by data category
 -   **Labels**:
-    -   `category`: Data type ("seasons", "tournaments_in_season", "tournament_matches", "unique_team_ids")
+    -   `category`: Data type ("valid_seasons", "tournaments_in_season", "tournament_matches", "unique_team_ids")
 -   **Use Cases**:
     -   Monitor data freshness and change frequency
     -   Identify which data categories change most often
@@ -255,7 +255,7 @@ The precache system periodically fetches season, tournament, match and team data
 -   **Type**: Gauge
 -   **Description**: Number of items processed in the last precache run
 -   **Labels**:
-    -   `item_type`: Type of data processed ("seasons", "tournaments", "matches", "teams")
+    -   `item_type`: Type of data processed ("seasons", "valid_seasons", "tournaments", "matches", "teams")
 -   **Use Cases**:
     -   Monitor data volume trends
     -   Detect unusual data volume changes
@@ -274,6 +274,19 @@ The precache system periodically fetches season, tournament, match and team data
     -   Identify which data types consume most storage
     -   Capacity planning for cache storage
     -   Detect data bloat or unusual size changes
+
+### `precache_api_call_success_rate`
+
+-   **Type**: Gauge
+-   **Description**: Success rate percentage of precache API calls by type
+-   **Labels**:
+    -   `call_type`: Type of API call ("seasons", "tournaments", "matches")
+-   **Use Cases**:
+    -   Monitor external API reliability
+    -   Detect API endpoint issues
+    -   Track overall precache health
+    -   Set up alerting for low success rates
+    -   Optimize retry strategies
 
 ---
 
@@ -387,7 +400,7 @@ Returns a dictionary with current time labels:
 ### Precache Labels
 
 -   **`status`**: Precache run outcome ("success" or "error")
--   **`category`**: Data category for change detection ("seasons", "tournaments_in_season", "tournament_matches", "unique_team_ids")
+-   **`category`**: Data category for change detection ("valid_seasons", "tournaments_in_season", "tournament_matches", "unique_team_ids")
 -   **`call_type`**: Type of API call during precache ("seasons", "tournaments", "matches")
 -   **`item_type`**: Type of data items processed ("seasons", "tournaments", "matches", "teams")
 
@@ -515,6 +528,18 @@ topk(5, precache_cached_data_size_bytes)
 sum(precache_cached_data_size_bytes)
 ```
 
+**Precache API Success Rate:**
+
+```promql
+precache_api_call_success_rate
+```
+
+**API Success Rate Alert Condition:**
+
+```promql
+precache_api_call_success_rate < 90
+```
+
 **Most Active Data Categories (Changes):**
 
 ```promql
@@ -627,6 +652,19 @@ rate(precache_duration_seconds_sum[5m]) / rate(precache_duration_seconds_count[5
   annotations:
       summary: 'Total cached data size is excessive'
       description: 'Total cached data size is {{ $value | humanize1024 }}B'
+```
+
+**Low API Success Rate:**
+
+```yaml
+- alert: LowPrecacheAPISuccessRate
+  expr: precache_api_call_success_rate < 90
+  for: 5m
+  labels:
+      severity: warning
+  annotations:
+      summary: 'Low precache API success rate'
+      description: 'Precache {{ $labels.call_type }} API calls have {{ $value }}% success rate'
 ```
 
 **No Data Changes Detected:**

@@ -55,6 +55,12 @@ PRECACHE_CACHED_DATA_SIZE = Gauge(
     ["data_type"]  # valid_seasons, tournaments_in_season, tournament_matches, unique_team_ids
 )
 
+PRECACHE_API_CALL_SUCCESS_RATE = Gauge(
+    "precache_api_call_success_rate",
+    "Success rate of precache API calls",
+    ["call_type"]  # seasons, tournaments, matches
+)
+
 
 async def _update_cached_data_size_metrics(redis_client):
     """Update metrics for the size of cached data"""
@@ -126,100 +132,152 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
 
                 # -----------------------------------------------------------------
                 # Fetch season list for relevant sports and years
+                # Only fetch seasons from 2024+ to reduce API calls and improve performance
                 seasons = []
                 current_year = pendulum.now().year
-
-                for year in range(2003, current_year + 1):
-                    for sport_id in [72, 151, 71, 73]:
+                sport_ids = [72, 151, 71, 73]  # Configurable sport IDs
+                
+                # Optimize by only fetching recent years since we filter to 2024+
+                start_year = max(2024, current_year - 2)  # Only fetch last 2-3 years for efficiency
+                
+                logger.info(f"Fetching seasons for years {start_year}-{current_year}, sports {sport_ids}")
+                
+                # Use async gathering for parallel requests
+                async def fetch_seasons_for_year_sport(year, sport_id):
+                    try:
                         url = f"{config.API_URL}/api/v1/ta/Seasons/"
-                        logger.info(f"Fetching seasons for year {year}, sport {sport_id} from {url}")
+                        logger.debug(f"Fetching seasons for year {year}, sport {sport_id}")
+                        
                         resp = await client.get(
                             url,
                             headers=headers,
                             params={"year": year, "sportId": sport_id},
                         )
-                        api_calls["seasons"] += 1
+                        
+                        # Track API call metrics
                         PRECACHE_API_CALLS.labels(call_type="seasons").inc()
                         
                         if resp.status_code < 400:
                             try:
                                 raw = resp.json()
+                                data = raw.get("seasons", [])
+                                
+                                # Normalize data structure
+                                if isinstance(data, dict):
+                                    return [data]
+                                elif isinstance(data, list):
+                                    return data
+                                else:
+                                    logger.warning(
+                                        f"Unexpected seasons data type for year={year} sport={sport_id}: {type(data).__name__}"
+                                    )
+                                    return []
+                                    
                             except Exception as e:
-                                # Parsing failed, skip this response safely
                                 logger.warning(
                                     f"Failed to parse seasons response for year={year} sport={sport_id}: {e}"
                                 )
-                                continue
-
-                            # Log size / type, not full payload (avoid huge logs)
-                            logger.info(
-                                f"Fetched seasons payload type={type(raw).__name__} year={year} sport={sport_id}"
-                            )
-
-                            # add the raw return even if it is a dict to the seasons list
-                            data = raw.get("seasons", [])
-                            if isinstance(data, dict):
-                                seasons.append(data)
-                            elif isinstance(data, list):
-                                seasons.extend(data)
-                            else:
-                                logger.warning(
-                                    f"Unexpected seasons data type for year={year} sport={sport_id}: {type(data).__name__}"
-                                )
-                                # skip adding anything
-                                continue
-
-                        # If response failed, skip adding anything (do not add empty array)
-                        await asyncio.sleep(0.2)
-
+                                return []
+                        else:
+                            logger.warning(f"API request failed for year={year} sport={sport_id}: {resp.status_code}")
+                            return []
+                            
+                    except Exception as e:
+                        logger.error(f"Error fetching seasons for year={year} sport={sport_id}: {e}")
+                        return []
+                
+                # Create tasks for parallel execution
+                tasks = []
+                total_expected_calls = 0
+                
+                for year in range(start_year, current_year + 1):
+                    for sport_id in sport_ids:
+                        tasks.append(fetch_seasons_for_year_sport(year, sport_id))
+                        total_expected_calls += 1
+                
+                successful_calls = 0
+                
+                # Execute all requests in parallel with limited concurrency
+                batch_size = 5  # Limit concurrent requests
+                for i in range(0, len(tasks), batch_size):
+                    batch = tasks[i:i + batch_size]
+                    results = await asyncio.gather(*batch, return_exceptions=True)
+                    
+                    # Process results
+                    for result in results:
+                        if isinstance(result, list):
+                            seasons.extend(result)
+                            successful_calls += 1
+                        elif isinstance(result, Exception):
+                            logger.error(f"Task failed: {result}")
+                    
+                    # Small delay between batches to be nice to the API
+                    if i + batch_size < len(tasks):
+                        await asyncio.sleep(0.1)
+                
+                # Update API call metrics
+                api_calls["seasons"] = total_expected_calls
+                if total_expected_calls > 0:
+                    success_rate = (successful_calls / total_expected_calls) * 100
+                    PRECACHE_API_CALL_SUCCESS_RATE.labels(call_type="seasons").set(success_rate)
+                    logger.info(f"Seasons API calls: {successful_calls}/{total_expected_calls} successful ({success_rate:.1f}%)")
 
                 # log the final seasons fetched
                 logger.info(f"Total seasons fetched: {len(seasons)}")
-                logger.debug(f"Fetched seasons: {seasons}")
 
-                # Update metrics for items processed
+                # Filter seasons to get valid ones with improved logic
+                valid_seasons = []
+                invalid_count = 0
+                
+                for season in seasons:
+                    if not isinstance(season, dict):
+                        invalid_count += 1
+                        continue
+                        
+                    try:
+                        # Parse season date
+                        season_date_from = season.get("seasonDateFrom")
+                        if not season_date_from:
+                            invalid_count += 1
+                            continue
+                            
+                        season_year = pendulum.parse(season_date_from).year
+                        sport_id = season.get("sportId")
+                        
+                        # Apply filtering criteria
+                        if season_year >= 2024:
+                            if sport_id != 72:
+                                # Include all non-bandy sports from 2024+
+                                valid_seasons.append(season)
+                            else:
+                                # For bandy (sport_id 72), exclude "bedrift" (company) leagues
+                                season_name = season.get("seasonName", "").lower()
+                                if "bedrift" not in season_name:
+                                    valid_seasons.append(season)
+                                    
+                    except (ValueError, TypeError, KeyError) as e:
+                        # Log parsing errors but continue processing
+                        logger.debug(f"Failed to parse season date for season {season.get('seasonId', 'unknown')}: {e}")
+                        invalid_count += 1
+                        continue
+
+                logger.info(f"Filtered to {len(valid_seasons)} valid seasons (skipped {invalid_count} invalid)")
+
+                # Update metrics for items processed (both total and filtered)
                 PRECACHE_ITEMS_PROCESSED.labels(item_type="seasons").set(len(seasons))
+                PRECACHE_ITEMS_PROCESSED.labels(item_type="valid_seasons").set(len(valid_seasons))
 
-                # if cached valid_seasons is different from seasons, we have changes
-                # so we need to mark changes_detected and store the new seasons
-
-                if json.dumps(seasons, sort_keys=True) != json.dumps(cached_valid_seasons or [], sort_keys=True):
-                    changes_detected["seasons"] = len(seasons)
-                    PRECACHE_CHANGES_DETECTED.labels(category="seasons").inc()
+                # Check if filtered valid_seasons have changed and update if needed
+                if json.dumps(valid_seasons, sort_keys=True) != json.dumps(cached_valid_seasons or [], sort_keys=True):
                     await redis_client.set(
                         "valid_seasons",
                         json.dumps(
-                            {"data": seasons, "last_updated": start_time.isoformat()},
+                            {"data": valid_seasons, "last_updated": start_time.isoformat()},
                             ensure_ascii=False,
                         ),
                     )
-
-                valid_seasons = []
-                # for season in seasons:
-                #     try:
-                #         season_year = pendulum.parse(season["seasonDateFrom"]).year
-                #     except Exception:
-                #         continue
-                #     sport_id = season.get("sportId")
-                #     if season_year >= 2024:
-                #         if sport_id != 72:
-                #             valid_seasons.append(season)
-                #         else:
-                #             name = season.get("seasonName", "").lower()
-                #             if "bedrift" not in name:
-                #                 valid_seasons.append(season)
-
-                # if json.dumps(valid_seasons, sort_keys=True) != json.dumps(
-                #     cached_valid_seasons or [], sort_keys=True
-                # ):
-                #     await redis_client.set(
-                #         "valid_seasons",
-                #         json.dumps(
-                #             {"data": valid_seasons, "last_updated": start_time.isoformat()},
-                #             ensure_ascii=False,
-                #         ),
-                #     )
-                #     changes_detected["valid_seasons"] = len(valid_seasons)
+                    changes_detected["valid_seasons"] = len(valid_seasons)
+                    PRECACHE_CHANGES_DETECTED.labels(category="valid_seasons").inc()
 
                 # -----------------------------------------------------------------
                 # Fetch tournaments per season
