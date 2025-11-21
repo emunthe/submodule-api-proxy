@@ -44,13 +44,13 @@ CACHE_REFRESH_BY_TIME = Counter(
 
 # Cache size metrics with time labels
 CACHE_ITEMS_BY_TIME = Gauge(
-    "cache_items_by_time",
+    "cache_items",
     "Number of cached items with time labels",
     ["hour", "day_of_week", "date"]
 )
 
 CACHE_ENDPOINTS_BY_TIME = Gauge(
-    "cache_endpoints_by_time", 
+    "cache_endpoints", 
     "Number of unique cached endpoints with time labels",
     ["hour", "day_of_week", "date"]
 )
