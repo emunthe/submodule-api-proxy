@@ -62,6 +62,17 @@ PRECACHE_API_CALL_SUCCESS_RATE = Gauge(
     ["call_type"]  # seasons, tournaments, matches
 )
 
+PRECACHE_VALID_SEASONS_COUNT = Gauge(
+    "precache_valid_seasons_count",
+    "Total number of valid seasons currently cached"
+)
+
+PRECACHE_VALID_SEASONS_INFO = Gauge(
+    "precache_valid_seasons_info",
+    "Information about valid seasons with season details as labels",
+    ["season_id", "season_name", "season_year", "sport_id", "sport_name"]
+)
+
 
 async def _update_cached_data_size_metrics(redis_client):
     """Update metrics for the size of cached data"""
@@ -86,6 +97,79 @@ async def _update_cached_data_size_metrics(redis_client):
         logger.error(f"Error updating cached data size metrics: {e}")
 
 
+async def _update_valid_seasons_metrics(redis_client):
+    """Update metrics for valid seasons content and count"""
+    try:
+        # Clear existing metrics first
+        PRECACHE_VALID_SEASONS_INFO.clear()
+        
+        # Get valid seasons data from Redis
+        raw_data = await redis_client.get("valid_seasons")
+        if raw_data:
+            try:
+                data = json.loads(raw_data)
+                valid_seasons = data.get("data", [])
+                
+                # Update count metric
+                PRECACHE_VALID_SEASONS_COUNT.set(len(valid_seasons))
+                
+                # Map sport IDs to names for better readability
+                sport_names = {
+                    72: "bandy",
+                    151: "innebandy", 
+                    71: "ishockey",
+                    73: "ringette"
+                }
+                
+                # Update info metric with labels for each season
+                for season in valid_seasons:
+                    if not isinstance(season, dict):
+                        continue
+                        
+                    season_id = str(season.get("seasonId", "unknown"))
+                    season_name = season.get("seasonName", "unknown")[:50]  # Limit length for labels
+                    sport_id = season.get("sportId", 0)
+                    sport_name = sport_names.get(sport_id, f"sport_{sport_id}")
+                    
+                    # Extract year from seasonDateFrom if available
+                    season_year = "unknown"
+                    season_date_from = season.get("seasonDateFrom")
+                    if season_date_from:
+                        try:
+                            # Try the most common format first
+                            if "/" in season_date_from:
+                                parsed_date = datetime.strptime(season_date_from.split()[0], "%m/%d/%Y")
+                                season_year = str(parsed_date.year)
+                            else:
+                                import pendulum
+                                parsed_date = pendulum.parse(season_date_from)
+                                season_year = str(parsed_date.year)
+                        except:
+                            # Keep unknown if parsing fails
+                            pass
+                    
+                    # Set metric with season information as labels
+                    PRECACHE_VALID_SEASONS_INFO.labels(
+                        season_id=season_id,
+                        season_name=season_name,
+                        season_year=season_year,
+                        sport_id=str(sport_id),
+                        sport_name=sport_name
+                    ).set(1)  # Value of 1 indicates this season exists
+                    
+                logger.debug(f"Updated valid seasons metrics: {len(valid_seasons)} seasons")
+                
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse valid_seasons data: {e}")
+                PRECACHE_VALID_SEASONS_COUNT.set(0)
+        else:
+            # No data available
+            PRECACHE_VALID_SEASONS_COUNT.set(0)
+            
+    except Exception as e:
+        logger.error(f"Error updating valid seasons metrics: {e}")
+
+
 async def clear_precache_data():
     """Clear all precache data from Redis"""
     redis_client = None
@@ -108,6 +192,7 @@ async def clear_precache_data():
         
         # Update metrics to reflect cleared data
         await _update_cached_data_size_metrics(redis_client)
+        await _update_valid_seasons_metrics(redis_client)
         
         # Reset last run timestamp
         PRECACHE_LAST_RUN_TIMESTAMP.set(0)
@@ -171,6 +256,9 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
 
                 # Update cached data size metrics
                 await _update_cached_data_size_metrics(redis_client)
+                
+                # Update valid seasons metrics
+                await _update_valid_seasons_metrics(redis_client)
 
                 token = await token_manager.get_token()
                 headers = {"Authorization": f"Bearer {token['access_token']}"}
@@ -431,12 +519,20 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                             parsed_verification = json.loads(verification)
                             stored_count = len(parsed_verification.get("data", []))
                             logger.info(f"VERIFICATION: Successfully stored {stored_count} valid seasons in Redis")
+                            
+                            # Update the new valid seasons metrics
+                            await _update_valid_seasons_metrics(redis_client)
+                            logger.debug(f"Updated valid seasons content and count metrics")
+                            
                         except Exception as e:
                             logger.error(f"VERIFICATION FAILED: Could not parse stored valid_seasons data: {e}")
                     else:
                         logger.error("VERIFICATION FAILED: No data found in Redis after attempted storage")
                 else:
                     logger.debug(f"No valid seasons changes detected - cache has {len(cached_valid_seasons or [])} seasons, fetched {len(valid_seasons)}")
+                    
+                    # Still update metrics even if no changes (for consistency)
+                    await _update_valid_seasons_metrics(redis_client)
 
                 # Log the final result for debugging
                 if len(valid_seasons) == 0:
@@ -685,6 +781,9 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
 
                 # Update cached data size metrics after potential data updates
                 await _update_cached_data_size_metrics(redis_client)
+                
+                # Update valid seasons metrics after potential data updates
+                await _update_valid_seasons_metrics(redis_client)
 
                 end_time = pendulum.now()
                 log_item = {
