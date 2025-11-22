@@ -1105,10 +1105,41 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                 ttl = 7 * 24 * 60 * 60
 
                 # Set up cache entries for changed individual matches (limited to 10 for debugging)
-                limited_match_ids = list(changed_match_ids)[:10]
-                if len(changed_match_ids) > 10:
-                    logger.info(f"Limiting match cache setup to 10 entries (total changed: {len(changed_match_ids)})")
+                # limited_match_ids = list(changed_match_ids)[:10]
+                # if len(changed_match_ids) > 10:
+                #     logger.info(f"Limiting match cache setup to 10 entries (total changed: {len(changed_match_ids)})")
                 
+                # Filter matches to only include those within 2 weeks of reference date
+                reference_date = pendulum.parse("2025-06-15T00:00:00")
+                two_weeks = pendulum.duration(weeks=2)
+                date_range_start = reference_date.subtract(weeks=2)
+                date_range_end = reference_date.add(weeks=2)
+                
+                limited_match_ids = []
+                for match_id in changed_match_ids:
+                    # Find the match data to check its date
+                    match_data = None
+                    for match in matches:
+                        if match.get("matchId") == match_id:
+                            match_data = match
+                            break
+                    
+                    if match_data and match_data.get("matchDate"):
+                        try:
+                            match_date = pendulum.parse(match_data["matchDate"])
+                            if date_range_start <= match_date <= date_range_end:
+                                limited_match_ids.append(match_id)
+                        except Exception as e:
+                            logger.debug(f"Failed to parse match date for match {match_id}: {e}")
+                            # Include matches with unparseable dates to be safe
+                            limited_match_ids.append(match_id)
+                    else:
+                        # Include matches without dates to be safe
+                        limited_match_ids.append(match_id)
+                
+                if len(changed_match_ids) > 0:
+                    logger.info(f"Filtered matches by date range: {len(limited_match_ids)}/{len(changed_match_ids)} matches within 2 weeks of {reference_date.format('YYYY-MM-DD')}")
+
                 for match_id in limited_match_ids:
                     try:
                         url = f"{config.API_URL}/api/v1/ta/Match/"
