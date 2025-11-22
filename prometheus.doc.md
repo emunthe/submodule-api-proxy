@@ -11,9 +11,10 @@ This document describes all Prometheus metrics exposed by the API Proxy service.
 5. [Performance Metrics](#performance-metrics)
 6. [Precache Metrics](#precache-metrics)
 7. [Precache Data Management](#precache-data-management)
-8. [Helper Functions](#helper-functions)
-9. [Label Descriptions](#label-descriptions)
-10. [Usage Examples](#usage-examples)
+8. [Individual Season Tournament Caching](#individual-season-tournament-caching)
+9. [Helper Functions](#helper-functions)
+10. [Label Descriptions](#label-descriptions)
+11. [Usage Examples](#usage-examples)
 
 ---
 
@@ -271,16 +272,18 @@ The precache system periodically fetches season, tournament, match and team data
 -   **Type**: Gauge
 -   **Description**: Size in bytes of cached precache data by data type
 -   **Labels**:
-    -   `data_type`: Type of cached data ("valid_seasons", "tournaments_in_season", "tournament_matches", "unique_team_ids")
+    -   `data_type`: Type of cached data ("valid*seasons", "tournaments_in_season", "tournament_matches", "unique_team_ids", "season_cache_tournaments_season*{id}")
 -   **Use Cases**:
     -   Monitor memory usage of cached precache data
     -   Track data growth over time
     -   Identify which data types consume most storage
     -   Capacity planning for cache storage
     -   Detect data bloat or unusual size changes
+    -   Monitor individual season cache sizes
 -   **Special Behaviors**:
     -   Automatically updated to 0 for all data types when precache data is cleared via `/precache` endpoint
     -   Updated after each successful precache run with actual data sizes
+    -   Includes individual season tournament cache entries with pattern `season_cache_tournaments_season_{season_id}`
 
 ### `precache_api_call_success_rate`
 
@@ -312,14 +315,30 @@ The API proxy provides an endpoint for manually clearing all precache data:
 ```json
 {
     "status": "success",
-    "message": "Cleared 4 precache data keys",
-    "cleared_keys": ["valid_seasons", "tournaments_in_season", "tournament_matches", "unique_team_ids"]
+    "message": "Cleared 8 precache data keys",
+    "cleared_keys": [
+        "valid_seasons",
+        "tournaments_in_season",
+        "tournament_matches",
+        "unique_team_ids",
+        "tournaments_season_12345",
+        "tournaments_season_67890",
+        "..."
+    ]
 }
 ```
 
+**Data Cleared**:
+
+-   `valid_seasons` - Aggregate valid seasons data
+-   `tournaments_in_season` - Aggregate tournament data from all seasons
+-   `tournament_matches` - Tournament match data
+-   `unique_team_ids` - Unique team identifiers
+-   `tournaments_season_{season_id}` - Individual season tournament cache entries (dynamically discovered)
+
 **Metric Effects**:
 
--   `precache_cached_data_size_bytes` → Set to 0 for all data types
+-   `precache_cached_data_size_bytes` → Set to 0 for all data types including individual season caches
 -   `precache_last_run_timestamp` → Reset to 0
 -   All other precache metrics remain unchanged (preserve historical data)
 
@@ -329,6 +348,141 @@ The API proxy provides an endpoint for manually clearing all precache data:
 -   Clear corrupted or stale precache data
 -   Reset precache state for testing
 -   Manual intervention when automatic precache fails
+-   Clear individual season caches when season data becomes stale
+
+---
+
+## Individual Season Tournament Caching
+
+### Overview
+
+In addition to aggregate tournament data, the precache system creates individual cache entries for each season's tournament data. This provides granular access to tournament information while maintaining API compatibility.
+
+### Cache Structure
+
+**Aggregate Cache (existing)**:
+
+-   **Key**: `tournaments_in_season`
+-   **Contains**: All tournaments from all seasons combined
+-   **Purpose**: Dashboard metrics and aggregate analysis
+
+**Individual Season Caches (new)**:
+
+-   **Key Pattern**: `tournaments_season_{season_id}`
+-   **Contains**: Tournaments for that specific season only
+-   **Purpose**: Direct API call replication and granular access
+-   **Examples**: `tournaments_season_12345`, `tournaments_season_67890`
+
+### Individual Cache Data Structure
+
+Each individual season cache entry contains:
+
+```json
+{
+    "data": [...],                              // Processed tournament list
+    "raw_response": {...},                      // Original API response
+    "api_url": "/api/v1/ta/Tournament/Season/12345/",  // API URL that was called
+    "season_id": 12345,                        // Season identifier
+    "last_updated": "2025-11-22T10:30:00Z"    // Timestamp when cached
+}
+```
+
+### API Function for Individual Season Access
+
+**Function**: `get_season_tournaments(season_id)`
+
+**Purpose**: Retrieve cached tournament data for a specific season
+
+**Parameters**:
+
+-   `season_id`: The season identifier to retrieve tournaments for
+
+**Response Format**:
+
+```json
+{
+    "status": "success",
+    "data": {
+        "data": [...],                          // List of tournaments
+        "raw_response": {...},                  // Original API response
+        "api_url": "...",                      // The API URL that was called
+        "season_id": 12345,                    // Season identifier
+        "last_updated": "2025-11-22T10:30:00Z"
+    },
+    "cache_key": "tournaments_season_12345",
+    "source": "cache"
+}
+```
+
+**Error Responses**:
+
+```json
+{
+    "status": "not_found",
+    "message": "No cached tournament data found for season 12345",
+    "cache_key": "tournaments_season_12345"
+}
+```
+
+```json
+{
+    "status": "error",
+    "message": "Invalid cached data for season 12345",
+    "cache_key": "tournaments_season_12345"
+}
+```
+
+### Benefits
+
+1. **Granular Access**: Retrieve tournament data for a specific season without loading all seasons
+2. **API Compatibility**: Each cache entry corresponds exactly to one `/api/v1/ta/Tournament/Season/{season_id}/` API call
+3. **Raw Response Preservation**: The original API response is preserved for exact replication
+4. **Better Performance**: Smaller, targeted cache retrievals instead of large aggregate data
+5. **Enhanced Monitoring**: Individual cache entries are tracked in size metrics
+
+### Monitoring Individual Season Caches
+
+**Cache Size Metrics**: Individual season caches are included in `precache_cached_data_size_bytes` with labels like:
+
+-   `data_type="season_cache_tournaments_season_12345"`
+
+**Logging**: The precache system logs creation of individual cache entries:
+
+```
+Created individual season cache entries: 15 entries
+Season cache keys: ['tournaments_season_12345', 'tournaments_season_67890', ...]
+```
+
+**Clearing**: Individual season caches are automatically discovered and cleared when using the `/precache` endpoint
+
+### Usage Examples
+
+**Direct Function Call**:
+
+```python
+# Get tournaments for a specific season
+result = await get_season_tournaments(season_id=12345)
+if result["status"] == "success":
+    tournament_data = result["data"]["data"]  # List of tournaments
+    raw_api_response = result["data"]["raw_response"]  # Original API response
+    api_url = result["data"]["api_url"]  # The API URL that was called
+```
+
+**Monitoring Queries**:
+
+```promql
+# Total size of all individual season caches
+sum(precache_cached_data_size_bytes{data_type=~"season_cache_tournaments_season_.*"})
+
+# Number of individual season caches
+count(precache_cached_data_size_bytes{data_type=~"season_cache_tournaments_season_.*"})
+
+# Largest individual season caches
+topk(5, precache_cached_data_size_bytes{data_type=~"season_cache_tournaments_season_.*"})
+
+# Average size of individual season caches
+avg(precache_cached_data_size_bytes{data_type=~"season_cache_tournaments_season_.*"})
+```
 
 ---
 
@@ -362,7 +516,7 @@ The API proxy provides an endpoint for manually clearing all precache data:
 
 ### `precache_valid_seasons_info`
 
--   **Type**: Gauge  
+-   **Type**: Gauge
 -   **Description**: Information about valid seasons with season details as labels
 -   **Labels**:
     -   `season_id`: Unique season identifier
@@ -796,6 +950,32 @@ rate(precache_duration_seconds_sum[5m]) / rate(precache_duration_seconds_count[5
   annotations:
       summary: 'Total cached data size is excessive'
       description: 'Total cached data size is {{ $value | humanize1024 }}B'
+```
+
+**Excessive Individual Season Cache Size:**
+
+```yaml
+- alert: ExcessiveIndividualSeasonCacheSize
+  expr: precache_cached_data_size_bytes{data_type=~"season_cache_tournaments_season_.*"} > 5000000 # 5MB per season
+  for: 10m
+  labels:
+      severity: warning
+  annotations:
+      summary: 'Individual season cache size is excessive'
+      description: 'Season cache {{ $labels.data_type }} is {{ $value | humanize1024 }}B in size'
+```
+
+**Too Many Individual Season Caches:**
+
+```yaml
+- alert: TooManyIndividualSeasonCaches
+  expr: count(precache_cached_data_size_bytes{data_type=~"season_cache_tournaments_season_.*"}) > 50
+  for: 15m
+  labels:
+      severity: warning
+  annotations:
+      summary: 'Too many individual season caches'
+      description: '{{ $value }} individual season caches exist, consider cleanup'
 ```
 
 **Low API Success Rate:**
