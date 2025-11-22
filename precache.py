@@ -1138,18 +1138,40 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                         limited_match_ids.append(match_id)
                 
                 if len(changed_match_ids) > 0:
-                    logger.info(f"Filtered matches by date range: {len(limited_match_ids)}/{len(changed_match_ids)} matches within 2 weeks of {reference_date.format('YYYY-MM-DD')}")
+                    logger.info(f"Filtered matches by date range: {len(limited_match_ids)}/{len(changed_match_ids)} matches within 1 weeks of {reference_date.format('YYYY-MM-DD')}")
+
+                # Set up cache entries for all match-related endpoints:
+                # /api/v1/ta/Match/?matchId=<id>
+                # /api/v1/ta/MatchIncidents/?matchId=<id>
+                # /api/v1/ta/MatchReferee?matchId=<id>
+                # /api/v1/ta/MatchTeamMembers/<id>/?images=false
+
+                match_endpoint_templates = [
+                    f"{config.API_URL}/api/v1/ta/Match/",
+                    f"{config.API_URL}/api/v1/ta/MatchIncidents/",
+                    f"{config.API_URL}/api/v1/ta/MatchReferee",
+                    f"{config.API_URL}/api/v1/ta/MatchTeamMembers/"
+                ]
 
                 for match_id in limited_match_ids:
-                    try:
-                        url = f"{config.API_URL}/api/v1/ta/Match/"
-                        cache_key = f"GET:{url}?matchId={match_id}"
-                        await cache_manager.setup_refresh(
-                            cache_key, url, ttl, refresh_until, params={"matchId": match_id}
-                        )
-                        logger.debug(f"Added cache refresh for changed match: {match_id}")
-                    except Exception as e:
-                        logger.error(f"Error setting up cache for match {match_id}: {e}")
+                    for base_url in match_endpoint_templates:
+                        try:
+                            # Special handling for MatchTeamMembers endpoint
+                            if "MatchTeamMembers" in base_url:
+                                url = f"{config.API_URL}/api/v1/ta/MatchTeamMembers/{match_id}/"
+                                cache_key = f"GET:{url}?images=false"
+                                params = {"images": "false"}
+                            else:
+                                url = base_url
+                                cache_key = f"GET:{url}?matchId={match_id}"
+                                params = {"matchId": match_id}
+                            
+                            await cache_manager.setup_refresh(
+                                cache_key, url, ttl, refresh_until, params=params
+                            )
+                            logger.debug(f"Added cache refresh for changed match {match_id}: {cache_key}")
+                        except Exception as e:
+                            logger.error(f"Error setting up cache for match {match_id} endpoint {base_url}: {e}")
 
                 # Set up cache entries for changed teams
                 for team_id in changed_team_ids:
