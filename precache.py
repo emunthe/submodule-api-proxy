@@ -1176,10 +1176,10 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                 # Set up cache entries for changed teams
                 for team_id in changed_team_ids:
                     try:
-                        url = f"{config.API_URL}/api/v1/ta/Team"
-                        cache_key = f"GET:{url}?teamId={team_id}"
+                        url = f"{config.API_URL}/api/v1/ta/Teams"
+                        cache_key = f"GET:{url}?orgId={team_id}"
                         await cache_manager.setup_refresh(
-                            cache_key, url, ttl, refresh_until, params={"teamId": team_id}
+                            cache_key, url, ttl, refresh_until, params={"orgId": team_id}
                         )
                         logger.debug(f"Added cache refresh for changed team: {team_id}")
                     except Exception as e:
@@ -1223,69 +1223,3 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                     await redis_client.close()
 
         await asyncio.sleep(180)
-
-
-async def get_tournaments_and_matches(token_manager):
-    """Get tournaments and scheduled matches"""
-    cache_key = "tournaments_matches"
-    redis_client = None
-    client = None
-
-    try:
-        redis_client = get_redis_client()
-        cached_data = await redis_client.get(cache_key)
-        if cached_data:
-            return {
-                "content": cached_data,
-                "status_code": 200,
-                "headers": {"X-Cache": "HIT"}
-            }
-
-        client = get_http_client()
-
-        tournaments_url = f"{config.API_URL}/api/v1/ta/Tournaments"
-        matches_url = f"{config.API_URL}/api/v1/ta/ScheduledMatches"
-
-        # tournaments_response = await client.get(tournaments_url, headers=headers)
-        # matches_response = await client.get(matches_url, headers=headers)
-
-        # if tournaments_response.status_code >= 400 or matches_response.status_code >= 400:
-        #     raise Exception("Failed to fetch tournaments or matches data")
-
-        params = {
-            "tournaments_url": tournaments_url,
-            "matches_url": matches_url,
-        }
-
-        logger.info(
-            f"Tournaments and matches params: {params}"
-        )
-
-        data = {
-            "tournaments": [],  # tournaments_response.json(),
-            "matches": [],  # matches_response.json(),
-            "last_updated": pendulum.now().isoformat(),
-        }
-
-        await redis_client.setex(
-            cache_key, config.DEFAULT_TTL, json.dumps(data, ensure_ascii=False)
-        )
-
-        return {
-            "content": json.dumps(data, ensure_ascii=False),
-            "status_code": 200,
-            "headers": {"X-Cache": "MISS"}
-        }
-    except Exception as e:
-        logger.error(f"Error in get_tournaments_and_matches: {e}")
-        logger.exception(e)
-        return {
-            "content": json.dumps({"error": str(e)}, ensure_ascii=False),
-            "status_code": 500,
-            "headers": {}
-        }
-    finally:
-        if client:
-            await client.aclose()
-        if redis_client:
-            await redis_client.close()
