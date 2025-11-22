@@ -379,11 +379,11 @@ Each individual season cache entry contains:
 
 ```json
 {
-    "data": [...],                              // Processed tournament list
-    "raw_response": {...},                      // Original API response
-    "api_url": "/api/v1/ta/Tournament/Season/12345/",  // API URL that was called
-    "season_id": 12345,                        // Season identifier
-    "last_updated": "2025-11-22T10:30:00Z"    // Timestamp when cached
+    "tournamentsInSeason": [...],                   // Processed tournament list (matches API response field)
+    "raw_response": {...},                          // Original API response
+    "api_url": "/api/v1/ta/Tournament/Season/12345/", // API URL that was called
+    "season_id": 12345,                            // Season identifier
+    "last_updated": "2025-11-22T10:30:00Z"        // Timestamp when cached
 }
 ```
 
@@ -403,10 +403,10 @@ Each individual season cache entry contains:
 {
     "status": "success",
     "data": {
-        "data": [...],                          // List of tournaments
-        "raw_response": {...},                  // Original API response
-        "api_url": "...",                      // The API URL that was called
-        "season_id": 12345,                    // Season identifier
+        "tournamentsInSeason": [...],               // List of tournaments (matches API response)
+        "raw_response": {...},                      // Original API response
+        "api_url": "...",                          // The API URL that was called
+        "season_id": 12345,                        // Season identifier
         "last_updated": "2025-11-22T10:30:00Z"
     },
     "cache_key": "tournaments_season_12345",
@@ -463,9 +463,9 @@ Season cache keys: ['tournaments_season_12345', 'tournaments_season_67890', ...]
 # Get tournaments for a specific season
 result = await get_season_tournaments(season_id=12345)
 if result["status"] == "success":
-    tournament_data = result["data"]["data"]  # List of tournaments
-    raw_api_response = result["data"]["raw_response"]  # Original API response
-    api_url = result["data"]["api_url"]  # The API URL that was called
+    tournament_data = result["data"]["tournamentsInSeason"]  # List of tournaments
+    raw_api_response = result["data"]["raw_response"]        # Original API response
+    api_url = result["data"]["api_url"]                      # The API URL that was called
 ```
 
 **Monitoring Queries**:

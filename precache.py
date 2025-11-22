@@ -703,7 +703,7 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                             season_id = season.get("seasonId")
                             if not season_id:
                                 logger.warning(f"Season missing seasonId: {season}")
-                                return {"tournaments": [], "root_tournaments": [], "success": False}
+                                return {"tournaments_in_season": [], "root_tournaments": [], "success": False}
                                 
                             url = f"{config.API_URL}/api/v1/ta/Tournament/Season/{season_id}/"
                             logger.debug(f"Fetching tournaments for season {season_id}")
@@ -732,7 +732,7 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                                     # Cache individual season tournament data
                                     season_cache_key = f"tournaments_season_{season_id}"
                                     season_cache_data = {
-                                        "data": tournaments_for_season,
+                                        "tournamentsInSeason": tournaments_for_season,
                                         "raw_response": raw_response,
                                         "api_url": url,
                                         "season_id": season_id,
@@ -749,7 +749,7 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                                         logger.warning(f"Failed to cache season {season_id} tournament data: {cache_error}")
                                     
                                     return {
-                                        "tournaments": tournaments_for_season,
+                                        "tournaments_in_season": tournaments_for_season,
                                         "root_tournaments": root_tournaments_for_season,
                                         "success": True,
                                         "season_cache_key": season_cache_key
@@ -757,14 +757,14 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                                     
                                 except Exception as e:
                                     logger.warning(f"Failed to parse tournaments response for season {season_id}: {e}")
-                                    return {"tournaments": [], "root_tournaments": [], "success": False}
+                                    return {"tournaments_in_season": [], "root_tournaments": [], "success": False}
                             else:
                                 logger.warning(f"Tournaments API request failed for season {season_id}: {resp.status_code}")
-                                return {"tournaments": [], "root_tournaments": [], "success": False}
+                                return {"tournaments_in_season": [], "root_tournaments": [], "success": False}
                                 
                         except Exception as e:
                             logger.error(f"Error fetching tournaments for season {season.get('seasonId', 'unknown')}: {e}")
-                            return {"tournaments": [], "root_tournaments": [], "success": False}
+                            return {"tournaments_in_season": [], "root_tournaments": [], "success": False}
                     
                     # Create tasks for parallel execution
                     tournament_tasks = [fetch_tournaments_for_season(season) for season in valid_seasons]
@@ -785,7 +785,7 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                         # Process batch results
                         for result in results:
                             if isinstance(result, dict) and result.get("success"):
-                                tournaments.extend(result["tournaments"])
+                                tournaments.extend(result["tournaments_in_season"])
                                 root_tournaments.extend(result["root_tournaments"])
                                 successful_tournament_calls += 1
                                 
