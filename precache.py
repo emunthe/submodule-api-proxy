@@ -821,19 +821,18 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                         
                         # 2. Set up cache for individual tournament-specific endpoints
                         tournament_endpoint_templates = [
-                            (f"{config.API_URL}/api/v1/ta/tournament/", {"tournamentId": None}),
-                            (f"{config.API_URL}/api/v1/ta/tournamentmatches/", {"tournamentId": None}),
-                            (f"{config.API_URL}/api/v1/ta/tournamentteams", {"tournamentId": None})
+                            f"{config.API_URL}/api/v1/ta/Tournament",
+                            f"{config.API_URL}/api/v1/ta/TournamentMatches",
+                            f"{config.API_URL}/api/v1/ta/TournamentTeams"
                         ]
                         
                         for tournament_id in tournament_ids:
-                            for base_url, params_template in tournament_endpoint_templates:
+                            for base_url in tournament_endpoint_templates:
                                 try:
-                                    # Create params with actual tournament ID
-                                    params = params_template.copy()
-                                    params["tournamentId"] = tournament_id
+                                    # Create params with tournament ID
+                                    params = {"tournamentId": tournament_id}
                                     
-                                    # Create cache key
+                                    # Create cache key - matches the pattern used elsewhere in the codebase
                                     cache_key = f"GET:{base_url}?tournamentId={tournament_id}"
                                     
                                     # Check if cache entry exists
@@ -918,10 +917,6 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                             ensure_ascii=False,
                         ),
                     )
-
-                    # api/v1/ta/tournament/?tournamentId=440904
-                    # api/v1/ta/tournamentmatches/?tournamentId=440904
-                    # api/v1/ta/tournamentteams?tournamentId=440904
                     
                     # Ensure cache entries exist for all unique apiPath values
                     await ensure_cache_entries_for_api_paths(tournaments)
