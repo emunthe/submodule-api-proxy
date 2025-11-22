@@ -767,36 +767,37 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                             return {"tournaments_in_season": [], "root_tournaments": [], "success": False}
 
                     async def ensure_cache_entries_for_api_paths(tournaments_list):
-                        """Ensure cache entries exist for all unique apiPath values in tournaments"""
+                        """Ensure cache entries exist for all unique apiPath values in tournaments and individual tournament endpoints"""
                         if not tournaments_list:
                             return
                         
-                        # Extract unique apiPath values
+                        # Extract unique apiPath values (season-based tournament lists)
                         api_paths = set()
+                        tournament_ids = set()
+                        
                         for tournament in tournaments_list:
-                            if isinstance(tournament, dict) and tournament.get("apiPath"):
-                                api_paths.add(tournament["apiPath"])
+                            if isinstance(tournament, dict):
+                                if tournament.get("apiPath"):
+                                    api_paths.add(tournament["apiPath"])
+                                if tournament.get("tournamentId"):
+                                    tournament_ids.add(tournament["tournamentId"])
                         
-                        logger.info(f"Found {len(api_paths)} unique API paths in tournaments")
+                        logger.info(f"Found {len(api_paths)} unique API paths and {len(tournament_ids)} tournament IDs")
                         
-                        # Check for each apiPath if cache entry exists
                         refresh_until = pendulum.now().add(days=7)
                         ttl = 7 * 24 * 60 * 60  # 7 days
                         
+                        # 1. Set up cache for season-based tournament listing APIs
                         for api_path in api_paths:
                             try:
-                                # Create cache key for the API path
                                 cache_key = f"GET:{api_path}"
-                                
-                                # Check if cache entry exists
                                 existing_cache = await redis_client.get(cache_key)
                                 
                                 if not existing_cache:
-                                    # No cache entry exists, set up refresh for this API path
                                     logger.debug(f"Setting up cache refresh for missing API path: {api_path}")
                                     
                                     # Parse URL to extract season_id for the params
-                                    # API path format: https://data.nif.no/api/v1/ta/Tournament/Season/{season_id}/
+                                    # API path format: https://data.nif.no/api/v1/ta/Tournament/Season/{season_id}/?hierarchy=true
                                     import re
                                     season_match = re.search(r'/Tournament/Season/(\d+)/', api_path)
                                     if season_match:
@@ -808,7 +809,6 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                                         )
                                         logger.debug(f"Added cache refresh for API path: {api_path} (season {season_id})")
                                     else:
-                                        # Fallback for unexpected API path format
                                         await cache_manager.setup_refresh(
                                             cache_key, api_path, ttl, refresh_until
                                         )
@@ -819,7 +819,38 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                             except Exception as e:
                                 logger.error(f"Error setting up cache for API path {api_path}: {e}")
                         
-                        logger.info(f"Completed cache setup check for {len(api_paths)} API paths")
+                        # 2. Set up cache for individual tournament-specific endpoints
+                        tournament_endpoint_templates = [
+                            (f"{config.API_URL}/api/v1/ta/tournament/", {"tournamentId": None}),
+                            (f"{config.API_URL}/api/v1/ta/tournamentmatches/", {"tournamentId": None}),
+                            (f"{config.API_URL}/api/v1/ta/tournamentteams", {"tournamentId": None})
+                        ]
+                        
+                        for tournament_id in tournament_ids:
+                            for base_url, params_template in tournament_endpoint_templates:
+                                try:
+                                    # Create params with actual tournament ID
+                                    params = params_template.copy()
+                                    params["tournamentId"] = tournament_id
+                                    
+                                    # Create cache key
+                                    cache_key = f"GET:{base_url}?tournamentId={tournament_id}"
+                                    
+                                    # Check if cache entry exists
+                                    existing_cache = await redis_client.get(cache_key)
+                                    
+                                    if not existing_cache:
+                                        await cache_manager.setup_refresh(
+                                            cache_key, base_url, ttl, refresh_until, params=params
+                                        )
+                                        logger.debug(f"Added cache refresh for tournament endpoint: {cache_key}")
+                                    else:
+                                        logger.debug(f"Cache entry already exists for tournament endpoint: {cache_key}")
+                                        
+                                except Exception as e:
+                                    logger.error(f"Error setting up cache for tournament {tournament_id} endpoint {base_url}: {e}")
+                        
+                        logger.info(f"Completed cache setup check for {len(api_paths)} season API paths and {len(tournament_ids)} * 3 tournament endpoints")
                     
                     # Create tasks for parallel execution
                     tournament_tasks = [fetch_tournaments_for_season(season) for season in valid_seasons]
@@ -887,6 +918,10 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                             ensure_ascii=False,
                         ),
                     )
+
+                    # api/v1/ta/tournament/?tournamentId=440904
+                    # api/v1/ta/tournamentmatches/?tournamentId=440904
+                    # api/v1/ta/tournamentteams?tournamentId=440904
                     
                     # Ensure cache entries exist for all unique apiPath values
                     await ensure_cache_entries_for_api_paths(tournaments)
