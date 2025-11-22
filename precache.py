@@ -91,6 +91,7 @@ async def _update_cached_data_size_metrics(redis_client):
         cache_keys = {
             "valid_seasons": "valid_seasons",
             "tournaments_in_season": "tournaments_in_season", 
+            "root_tournaments": "root_tournaments",
             "tournament_matches": "tournament_matches",
             "unique_team_ids": "unique_team_ids"
         }
@@ -265,6 +266,7 @@ async def clear_precache_data():
         precache_keys = [
             "valid_seasons",
             "tournaments_in_season", 
+            "root_tournaments",
             "tournament_matches",
             "unique_team_ids"
         ]
@@ -370,6 +372,7 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
         # Ensure these are defined even if related blocks are commented out
         changed_tournament_ids = set()
         changed_team_ids = []
+        changed_match_ids = set()
 
         # Start timing for metrics
         with PRECACHE_DURATION_SECONDS.time():
@@ -821,8 +824,8 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                         
                         # 2. Set up cache for individual tournament-specific endpoints
                         tournament_endpoint_templates = [
-                            f"{config.API_URL}/api/v1/ta/Tournament",
-                            f"{config.API_URL}/api/v1/ta/TournamentMatches",
+                            f"{config.API_URL}/api/v1/ta/Tournament/",
+                            f"{config.API_URL}/api/v1/ta/TournamentMatches/",
                             f"{config.API_URL}/api/v1/ta/TournamentTeams"
                         ]
                         
@@ -832,7 +835,7 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                                     # Create params with tournament ID
                                     params = {"tournamentId": tournament_id}
                                     
-                                    # Create cache key - matches the pattern used elsewhere in the codebase
+                                    # Create cache key - matches your API endpoint format exactly
                                     cache_key = f"GET:{base_url}?tournamentId={tournament_id}"
                                     
                                     # Check if cache entry exists
@@ -918,6 +921,15 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                         ),
                     )
                     
+                    # Store root tournaments separately
+                    await redis_client.set(
+                        "root_tournaments",
+                        json.dumps(
+                            {"data": root_tournaments, "last_updated": start_time.isoformat()},
+                            ensure_ascii=False,
+                        ),
+                    )
+                    
                     # Ensure cache entries exist for all unique apiPath values
                     await ensure_cache_entries_for_api_paths(tournaments)
                     
@@ -941,106 +953,182 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                     # Still update metrics even if no changes (for consistency)
                     await _update_tournaments_in_season_metrics(redis_client)
 
+                
+                
                 # -----------------------------------------------------------------
                 # Fetch tournament matches for root tournaments
+                # get data with calls to /api/v1/ta/TournamentMatches?tournamentId={tournamentId} based on root_tournaments only
                 matches = []
-                # for tournament in root_tournaments:
-                #     tid = tournament.get("tournamentId")
-                #     url = f"{config.API_URL}/api/v1/ta/TournamentMatches/"
-                #     params = {"tournamentId": tid}
-                #     resp = await client.get(url, headers=headers, params=params)
-                #     api_calls["matches"] += 1
-                #     PRECACHE_API_CALLS.labels(call_type="matches").inc()
-                #     if resp.status_code < 400:
-                #         for m in resp.json().get("matches", []):
-                #             m["apiPath"] = f"{url}?tournamentId={tid}"
-                #             matches.append(m)
-                #     await asyncio.sleep(0.2)
+                for tournament in root_tournaments:
+                    tournament_id = tournament.get("tournamentId")
+                    if not tournament_id:
+                        continue
+                    try:
+                        url = f"{config.API_URL}/api/v1/ta/TournamentMatches"
+                        resp = await client.get(url, headers=headers, params={"tournamentId": tournament_id})
+                        PRECACHE_API_CALLS.labels(call_type="matches").inc()
+                        
+                        # store raw response for detecting changes
+                        if resp.status_code < 400:
+                            try:
+                                raw_response = resp.json()
+                                tournament_matches = raw_response.get("matches", [])
+                                
+                                for match in tournament_matches:
+                                    # Validate match structure
+                                    if not isinstance(match, dict) or not match.get("matchId"):
+                                        logger.debug(f"Skipping invalid match data: {match}")
+                                        continue
+                                    
+                                    match["apiPath"] = url
+                                    match["tournamentId"] = tournament_id
+                                    matches.append(match)
+                                
+                                logger.debug(f"Fetched {len(tournament_matches)} matches for tournament {tournament_id}")
+                            except Exception as e:
+                                logger.warning(f"Failed to parse matches response for tournament {tournament_id}: {e}")
+                        else:
+                            logger.warning(f"Matches API request failed for tournament {tournament_id}: {resp.status_code}")
+                    except Exception as e:
+                        logger.error(f"Error fetching matches for tournament {tournament_id}: {e}") 
+                
+
 
                 # Update metrics for matches processed
                 PRECACHE_ITEMS_PROCESSED.labels(item_type="matches").set(len(matches))
 
-                # if json.dumps(matches, sort_keys=True) != json.dumps(
-                #     cached_matches or [], sort_keys=True
-                # ):
-                #     await redis_client.set(
-                #         "tournament_matches",
-                #         json.dumps(
-                #             {"data": matches, "last_updated": start_time.isoformat()},
-                #             ensure_ascii=False,
-                #         ),
-                #     )
+                # Store raw match data and detect changes
+                matches_changed = json.dumps(matches, sort_keys=True) != json.dumps(
+                    cached_matches or [], sort_keys=True
+                )
+                
+                changed_match_ids = set()
+                changed_tournament_ids = set()
+                
+                if matches_changed:
+                    await redis_client.set(
+                        "tournament_matches",
+                        json.dumps(
+                            {"data": matches, "last_updated": start_time.isoformat()},
+                            ensure_ascii=False,
+                        ),
+                    )
 
-                #     def _group_by_tournament(data):
-                #         grouped = {}
-                #         for item in data:
-                #             tid = item.get("tournamentId")
-                #             if tid is None:
-                #                 continue
-                #             grouped.setdefault(tid, []).append(item)
-                #         return grouped
+                    def _group_by_tournament(data):
+                        grouped = {}
+                        for item in data:
+                            tid = item.get("tournamentId")
+                            if tid is None:
+                                continue
+                            grouped.setdefault(tid, []).append(item)
+                        return grouped
 
-                #     new_group = _group_by_tournament(matches)
-                #     old_group = _group_by_tournament(cached_matches or [])
-                #     changed_tournament_ids = set()
-                #     for tid, new_list in new_group.items():
-                #         old_list = old_group.get(tid, [])
-                #         if json.dumps(new_list, sort_keys=True) != json.dumps(
-                #             old_list, sort_keys=True
-                #         ):
-                #             changed_tournament_ids.add(tid)
-                #     for tid in old_group:
-                #         if tid not in new_group:
-                #             changed_tournament_ids.add(tid)
-                #     changes_detected["tournament_matches"] = len(changed_tournament_ids)
-                #     PRECACHE_CHANGES_DETECTED.labels(category="tournament_matches").inc()
-                # else:
-                #     changed_tournament_ids = set()
+                    def _group_by_match_id(data):
+                        grouped = {}
+                        for item in data:
+                            mid = item.get("matchId")
+                            if mid is None:
+                                continue
+                            grouped[mid] = item
+                        return grouped
+
+                    # Detect changed tournaments
+                    new_group = _group_by_tournament(matches)
+                    old_group = _group_by_tournament(cached_matches or [])
+                    
+                    for tid, new_list in new_group.items():
+                        old_list = old_group.get(tid, [])
+                        if json.dumps(new_list, sort_keys=True) != json.dumps(
+                            old_list, sort_keys=True
+                        ):
+                            changed_tournament_ids.add(tid)
+                    
+                    for tid in old_group:
+                        if tid not in new_group:
+                            changed_tournament_ids.add(tid)
+                    
+                    # Detect changed individual matches
+                    new_matches_by_id = _group_by_match_id(matches)
+                    old_matches_by_id = _group_by_match_id(cached_matches or [])
+                    
+                    for match_id, new_match in new_matches_by_id.items():
+                        old_match = old_matches_by_id.get(match_id, {})
+                        if json.dumps(new_match, sort_keys=True) != json.dumps(
+                            old_match, sort_keys=True
+                        ):
+                            changed_match_ids.add(match_id)
+                    
+                    for match_id in old_matches_by_id:
+                        if match_id not in new_matches_by_id:
+                            changed_match_ids.add(match_id)
+                    
+                    changes_detected["tournament_matches"] = len(changed_tournament_ids)
+                    changes_detected["individual_matches"] = len(changed_match_ids)
+                    PRECACHE_CHANGES_DETECTED.labels(category="tournament_matches").inc()
+                    PRECACHE_CHANGES_DETECTED.labels(category="individual_matches").inc()
+                    
+                    logger.info(f"Matches changes detected: {len(changed_tournament_ids)} tournaments, {len(changed_match_ids)} individual matches")
+                else:
+                    changed_match_ids = set()
+                    changed_tournament_ids = set()
+                    logger.debug("No match changes detected")
 
                 # -----------------------------------------------------------------
                 # Unique team identifiers
                 team_ids = set()
-                # for match in matches:
-                #     for key in ("hometeamId", "awayteamId"):
-                #         tid = match.get(key)
-                #         if tid is not None:
-                #             team_ids.add(tid)
+                for match in matches:
+                    for key in ("hometeamId", "awayteamId"):
+                        tid = match.get(key)
+                        if tid is not None:
+                            team_ids.add(tid)
 
                 # Update metrics for teams processed
                 PRECACHE_ITEMS_PROCESSED.labels(item_type="teams").set(len(team_ids))
 
-                # if team_ids != set(cached_team_ids):
-                #     await redis_client.set(
-                #         "unique_team_ids",
-                #         json.dumps(
-                #             {"data": list(team_ids), "last_updated": start_time.isoformat()},
-                #             ensure_ascii=False,
-                #         ),
-                #     )
-                #     changed_team_ids = list(team_ids.symmetric_difference(set(cached_team_ids)))
-                #     changes_detected["unique_team_ids"] = len(changed_team_ids)
-                #     PRECACHE_CHANGES_DETECTED.labels(category="unique_team_ids").inc()
-                # else:
-                #     changed_team_ids = []
+                changed_team_ids = []
+                if team_ids != set(cached_team_ids):
+                    await redis_client.set(
+                        "unique_team_ids",
+                        json.dumps(
+                            {"data": list(team_ids), "last_updated": start_time.isoformat()},
+                            ensure_ascii=False,
+                        ),
+                    )
+                    changed_team_ids = list(team_ids.symmetric_difference(set(cached_team_ids)))
+                    changes_detected["unique_team_ids"] = len(changed_team_ids)
+                    PRECACHE_CHANGES_DETECTED.labels(category="unique_team_ids").inc()
+                    logger.info(f"Team changes detected: {len(changed_team_ids)} teams")
 
                 # -----------------------------------------------------------------
-                # Warm caches for changed tournaments and teams
+                # Warm caches for changed tournaments, teams, and individual matches
                 refresh_until = pendulum.now().add(days=7)
                 ttl = 7 * 24 * 60 * 60
 
-                for tid in changed_tournament_ids:
-                    url = f"{config.API_URL}/api/v1/ta/TournamentMatches"
-                    cache_key = f"GET:{url}?tournamentId={tid}"
-                    await cache_manager.setup_refresh(
-                        cache_key, url, ttl, refresh_until, params={"tournamentId": tid}
-                    )
+                # Set up cache entries for changed individual matches
+                for match_id in changed_match_ids:
+                    try:
+                        url = f"{config.API_URL}/api/v1/ta/Match/"
+                        cache_key = f"GET:{url}?matchId={match_id}"
+                        await cache_manager.setup_refresh(
+                            cache_key, url, ttl, refresh_until, params={"matchId": match_id}
+                        )
+                        logger.debug(f"Added cache refresh for changed match: {match_id}")
+                    except Exception as e:
+                        logger.error(f"Error setting up cache for match {match_id}: {e}")
 
+                # Set up cache entries for changed teams
                 for team_id in changed_team_ids:
-                    url = f"{config.API_URL}/api/v1/ta/Team"
-                    cache_key = f"GET:{url}?teamId={team_id}"
-                    await cache_manager.setup_refresh(
-                        cache_key, url, ttl, refresh_until, params={"teamId": team_id}
-                    )
+                    try:
+                        url = f"{config.API_URL}/api/v1/ta/Team"
+                        cache_key = f"GET:{url}?teamId={team_id}"
+                        await cache_manager.setup_refresh(
+                            cache_key, url, ttl, refresh_until, params={"teamId": team_id}
+                        )
+                        logger.debug(f"Added cache refresh for changed team: {team_id}")
+                    except Exception as e:
+                        logger.error(f"Error setting up cache for team {team_id}: {e}")
+
+                logger.info(f"Cache warming setup complete: {len(changed_match_ids)} matches, {len(changed_team_ids)} teams")
 
                 # Record successful run
                 PRECACHE_RUNS_TOTAL.labels(status="success").inc()

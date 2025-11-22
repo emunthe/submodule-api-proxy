@@ -193,6 +193,7 @@ async def get_stored_pre_cache_data():
         precache_keys = [
             "valid_seasons",
             "tournaments_in_season", 
+            "root_tournaments",
             "tournament_matches",
             "unique_team_ids"
         ]
