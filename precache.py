@@ -114,11 +114,15 @@ async def _update_valid_seasons_metrics(redis_client):
                 PRECACHE_VALID_SEASONS_COUNT.set(len(valid_seasons))
                 
                 # Map sport IDs to names for better readability
+                # sport_names = {
+                #     72: "bandy",
+                #     151: "innebandy", 
+                #     71: "landhockey",
+                #     73: "rinkbandy"
+                # }
                 sport_names = {
                     72: "bandy",
-                    151: "innebandy", 
-                    71: "ishockey",
-                    73: "ringette"
+                    151: "innebandy"
                 }
                 
                 # Update info metric with labels for each season
@@ -269,10 +273,12 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                 # Only fetch seasons from 2024+ to reduce API calls and improve performance
                 seasons = []
                 current_year = pendulum.now().year
-                sport_ids = [72, 151, 71, 73]  # Configurable sport IDs
+                # sport_ids = [72, 151, 71, 73]  # Configurable sport IDs
+                sport_ids = [72, 151]  # Configurable sport IDs
                 
                 # Optimize by only fetching recent years since we filter to 2024+
-                start_year = max(2024, current_year - 2)  # Only fetch last 2-3 years for efficiency
+                # start_year = max(2024, current_year - 2)  # Only fetch last 2-3 years for efficiency
+                start_year = current_year  # Only fetch last 2-3 years for efficiency
                 
                 logger.info(f"Fetching seasons for years {start_year}-{current_year}, sports {sport_ids}")
                 
