@@ -95,6 +95,20 @@ async def _update_cached_data_size_metrics(redis_client):
             "unique_team_ids": "unique_team_ids"
         }
         
+        # Add individual season tournament cache keys
+        try:
+            # Get all keys that match the season tournament pattern
+            season_tournament_keys = []
+            async for key in redis_client.scan_iter(match="tournaments_season_*"):
+                season_tournament_keys.append(key)
+            
+            # Add individual season caches to metrics
+            for key in season_tournament_keys:
+                cache_keys[f"season_cache_{key}"] = key
+                
+        except Exception as e:
+            logger.debug(f"Could not scan for season tournament cache keys: {e}")
+        
         for data_type, redis_key in cache_keys.items():
             raw_data = await redis_client.get(redis_key)
             if raw_data:
@@ -255,6 +269,13 @@ async def clear_precache_data():
             "unique_team_ids"
         ]
         
+        # Add individual season tournament cache keys
+        try:
+            async for key in redis_client.scan_iter(match="tournaments_season_*"):
+                precache_keys.append(key)
+        except Exception as e:
+            logger.debug(f"Could not scan for season tournament cache keys during clear: {e}")
+        
         cleared_keys = []
         for key in precache_keys:
             result = await redis_client.delete(key)
@@ -282,6 +303,49 @@ async def clear_precache_data():
         return {
             "status": "error", 
             "message": f"Failed to clear precache data: {str(e)}"
+        }
+    finally:
+        if redis_client:
+            await redis_client.close()
+
+
+async def get_season_tournaments(season_id):
+    """Get cached tournament data for a specific season"""
+    redis_client = None
+    try:
+        redis_client = get_redis_client()
+        
+        season_cache_key = f"tournaments_season_{season_id}"
+        raw_data = await redis_client.get(season_cache_key)
+        
+        if raw_data:
+            try:
+                cached_data = json.loads(raw_data)
+                return {
+                    "status": "success",
+                    "data": cached_data,
+                    "cache_key": season_cache_key,
+                    "source": "cache"
+                }
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse cached season tournament data for season {season_id}: {e}")
+                return {
+                    "status": "error",
+                    "message": f"Invalid cached data for season {season_id}",
+                    "cache_key": season_cache_key
+                }
+        else:
+            return {
+                "status": "not_found",
+                "message": f"No cached tournament data found for season {season_id}",
+                "cache_key": season_cache_key
+            }
+            
+    except Exception as e:
+        logger.error(f"Error retrieving season tournament data for season {season_id}: {e}")
+        return {
+            "status": "error",
+            "message": f"Failed to retrieve tournament data for season {season_id}: {str(e)}"
         }
     finally:
         if redis_client:
@@ -649,7 +713,8 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                             
                             if resp.status_code < 400:
                                 try:
-                                    data = resp.json().get("tournamentsInSeason", [])
+                                    raw_response = resp.json()
+                                    data = raw_response.get("tournamentsInSeason", [])
                                     tournaments_for_season = []
                                     root_tournaments_for_season = []
                                     
@@ -664,10 +729,30 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                                         if not t.get("parentTournamentId"):
                                             root_tournaments_for_season.append(t)
                                     
+                                    # Cache individual season tournament data
+                                    season_cache_key = f"tournaments_season_{season_id}"
+                                    season_cache_data = {
+                                        "data": tournaments_for_season,
+                                        "raw_response": raw_response,
+                                        "api_url": url,
+                                        "season_id": season_id,
+                                        "last_updated": pendulum.now().isoformat()
+                                    }
+                                    
+                                    try:
+                                        await redis_client.set(
+                                            season_cache_key,
+                                            json.dumps(season_cache_data, ensure_ascii=False)
+                                        )
+                                        logger.debug(f"Cached tournaments for season {season_id} in key: {season_cache_key}")
+                                    except Exception as cache_error:
+                                        logger.warning(f"Failed to cache season {season_id} tournament data: {cache_error}")
+                                    
                                     return {
                                         "tournaments": tournaments_for_season,
                                         "root_tournaments": root_tournaments_for_season,
-                                        "success": True
+                                        "success": True,
+                                        "season_cache_key": season_cache_key
                                     }
                                     
                                 except Exception as e:
@@ -688,6 +773,7 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                     
                     tournaments = []
                     root_tournaments = []
+                    season_cache_keys = []
                     
                     # Execute requests in batches to avoid overwhelming the API
                     batch_size = 3  # Smaller batch for tournaments since they can be larger responses
@@ -702,6 +788,11 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                                 tournaments.extend(result["tournaments"])
                                 root_tournaments.extend(result["root_tournaments"])
                                 successful_tournament_calls += 1
+                                
+                                # Track individual season cache keys
+                                if result.get("season_cache_key"):
+                                    season_cache_keys.append(result["season_cache_key"])
+                                    
                             elif isinstance(result, dict):
                                 # Failed but handled gracefully
                                 pass
@@ -711,6 +802,11 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                         # Small delay between batches
                         if i + batch_size < len(tournament_tasks):
                             await asyncio.sleep(0.1)
+                    
+                    # Log individual season cache entries created
+                    if season_cache_keys:
+                        logger.info(f"Created individual season cache entries: {len(season_cache_keys)} entries")
+                        logger.debug(f"Season cache keys: {season_cache_keys}")
                     
                     # Update API call tracking
                     api_calls["tournaments"] = total_tournament_calls
