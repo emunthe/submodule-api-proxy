@@ -348,6 +348,84 @@ The API proxy provides an endpoint for manually clearing all precache data:
 
 ---
 
+## Additional Precache Metrics
+
+### `precache_valid_seasons_count`
+
+-   **Type**: Gauge
+-   **Description**: Total number of valid seasons currently cached
+-   **Use Cases**:
+    -   Monitor valid seasons data availability
+    -   Track seasonal data changes
+    -   Verify precache data completeness
+    -   Set up alerts for missing season data
+
+### `precache_valid_seasons_info`
+
+-   **Type**: Gauge  
+-   **Description**: Information about valid seasons with season details as labels
+-   **Labels**:
+    -   `season_id`: Unique season identifier
+    -   `season_name`: Season name (truncated to 50 characters)
+    -   `season_year`: Year extracted from seasonDateFrom
+    -   `sport_id`: Sport identifier (72=bandy, 151=innebandy)
+    -   `sport_name`: Human-readable sport name
+-   **Value**: Always 1 (indicates season exists)
+-   **Use Cases**:
+    -   Detailed season monitoring with rich metadata
+    -   Sport-specific season tracking
+    -   Season year distribution analysis
+    -   Create season-specific alerts and dashboards
+
+### `precache_tournaments_in_season_count`
+
+-   **Type**: Gauge
+-   **Description**: Total number of tournaments in season currently cached
+-   **Use Cases**:
+    -   Monitor tournament data volume
+    -   Track tournament changes over time
+    -   Verify precache data completeness
+    -   Set up alerts for missing tournament data
+
+### `precache_tournaments_in_season_info`
+
+-   **Type**: Gauge
+-   **Description**: Information about tournaments in season with tournament details as labels
+-   **Labels**:
+    -   `tournament_id`: Unique tournament identifier
+    -   `tournament_name`: Tournament name (truncated to 50 characters)
+    -   `season_id`: Associated season identifier
+    -   `sport_id`: Sport identifier
+    -   `is_root`: "true" for root tournaments, "false" for child tournaments
+-   **Value**: Always 1 (indicates tournament exists)
+-   **Use Cases**:
+    -   Detailed tournament monitoring with rich metadata
+    -   Track root vs child tournament distribution
+    -   Season-tournament relationship analysis
+    -   Sport-specific tournament tracking
+    -   Create tournament hierarchy dashboards
+
+**Example Queries:**
+
+```promql
+# Total valid seasons by sport
+sum by (sport_name) (precache_valid_seasons_info)
+
+# Total tournaments by sport
+sum by (sport_id) (precache_tournaments_in_season_info)
+
+# Root tournaments only
+sum(precache_tournaments_in_season_info{is_root="true"})
+
+# Tournaments per season
+sum by (season_id) (precache_tournaments_in_season_info)
+
+# Monitor data completeness
+precache_valid_seasons_count > 0 and precache_tournaments_in_season_count > 0
+```
+
+---
+
 ## Helper Functions
 
 ### `get_time_labels()`
@@ -445,6 +523,14 @@ Returns a dictionary with current time labels:
 -   **`category`**: Data category for change detection ("valid_seasons", "tournaments_in_season", "tournament_matches", "unique_team_ids")
 -   **`call_type`**: Type of API call during precache ("seasons", "tournaments", "matches")
 -   **`item_type`**: Type of data items processed ("seasons", "tournaments", "matches", "teams")
+-   **`season_id`**: Unique season identifier
+-   **`season_name`**: Season name (truncated to 50 characters)
+-   **`season_year`**: Year extracted from seasonDateFrom
+-   **`sport_id`**: Sport identifier (72=bandy, 151=innebandy)
+-   **`sport_name`**: Human-readable sport name
+-   **`tournament_id`**: Unique tournament identifier
+-   **`tournament_name`**: Tournament name (truncated to 50 characters)
+-   **`is_root`**: "true" for root tournaments, "false" for child tournaments
 
 ---
 
