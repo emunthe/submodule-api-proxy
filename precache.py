@@ -1104,8 +1104,12 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                 refresh_until = pendulum.now().add(days=7)
                 ttl = 7 * 24 * 60 * 60
 
-                # Set up cache entries for changed individual matches
-                for match_id in changed_match_ids:
+                # Set up cache entries for changed individual matches (limited to 10 for debugging)
+                limited_match_ids = list(changed_match_ids)[:10]
+                if len(changed_match_ids) > 10:
+                    logger.info(f"Limiting match cache setup to 10 entries (total changed: {len(changed_match_ids)})")
+                
+                for match_id in limited_match_ids:
                     try:
                         url = f"{config.API_URL}/api/v1/ta/Match/"
                         cache_key = f"GET:{url}?matchId={match_id}"
