@@ -765,6 +765,61 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                         except Exception as e:
                             logger.error(f"Error fetching tournaments for season {season.get('seasonId', 'unknown')}: {e}")
                             return {"tournaments_in_season": [], "root_tournaments": [], "success": False}
+
+                    async def ensure_cache_entries_for_api_paths(tournaments_list):
+                        """Ensure cache entries exist for all unique apiPath values in tournaments"""
+                        if not tournaments_list:
+                            return
+                        
+                        # Extract unique apiPath values
+                        api_paths = set()
+                        for tournament in tournaments_list:
+                            if isinstance(tournament, dict) and tournament.get("apiPath"):
+                                api_paths.add(tournament["apiPath"])
+                        
+                        logger.info(f"Found {len(api_paths)} unique API paths in tournaments")
+                        
+                        # Check for each apiPath if cache entry exists
+                        refresh_until = pendulum.now().add(days=7)
+                        ttl = 7 * 24 * 60 * 60  # 7 days
+                        
+                        for api_path in api_paths:
+                            try:
+                                # Create cache key for the API path
+                                cache_key = f"GET:{api_path}"
+                                
+                                # Check if cache entry exists
+                                existing_cache = await redis_client.get(cache_key)
+                                
+                                if not existing_cache:
+                                    # No cache entry exists, set up refresh for this API path
+                                    logger.debug(f"Setting up cache refresh for missing API path: {api_path}")
+                                    
+                                    # Parse URL to extract season_id for the params
+                                    # API path format: https://data.nif.no/api/v1/ta/Tournament/Season/{season_id}/
+                                    import re
+                                    season_match = re.search(r'/Tournament/Season/(\d+)/', api_path)
+                                    if season_match:
+                                        season_id = season_match.group(1)
+                                        params = {"hierarchy": True}
+                                        
+                                        await cache_manager.setup_refresh(
+                                            cache_key, api_path, ttl, refresh_until, params=params
+                                        )
+                                        logger.debug(f"Added cache refresh for API path: {api_path} (season {season_id})")
+                                    else:
+                                        # Fallback for unexpected API path format
+                                        await cache_manager.setup_refresh(
+                                            cache_key, api_path, ttl, refresh_until
+                                        )
+                                        logger.debug(f"Added cache refresh for API path: {api_path} (no season extracted)")
+                                else:
+                                    logger.debug(f"Cache entry already exists for API path: {api_path}")
+                                    
+                            except Exception as e:
+                                logger.error(f"Error setting up cache for API path {api_path}: {e}")
+                        
+                        logger.info(f"Completed cache setup check for {len(api_paths)} API paths")
                     
                     # Create tasks for parallel execution
                     tournament_tasks = [fetch_tournaments_for_season(season) for season in valid_seasons]
@@ -832,6 +887,9 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                             ensure_ascii=False,
                         ),
                     )
+                    
+                    # Ensure cache entries exist for all unique apiPath values
+                    await ensure_cache_entries_for_api_paths(tournaments)
                     
                     # Calculate which tournaments changed
                     cached_ids = {t["tournamentId"] for t in (cached_tournaments or []) if "tournamentId" in t}
