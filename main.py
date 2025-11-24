@@ -159,6 +159,55 @@ async def get_production_metrics():
     return await cache_manager.get_production_metrics()
 
 
+@app.get("/redis/status", summary="Get quick Redis status", tags=["Cache", "Monitoring"])
+async def get_redis_status():
+    """Get quick Redis status for development monitoring"""
+    redis = None
+    try:
+        redis = get_redis_client()
+        
+        # Get basic stats
+        memory_info = await redis.info("memory")
+        stats_info = await redis.info("stats")
+        clients_info = await redis.info("clients")
+        
+        # Quick key counts
+        total_keys = await redis.dbsize()
+        
+        # Hit ratio
+        hits = stats_info.get('keyspace_hits', 0)
+        misses = stats_info.get('keyspace_misses', 0)
+        hit_ratio = (hits / (hits + misses) * 100) if (hits + misses) > 0 else 0
+        
+        status = {
+            "status": "healthy",
+            "memory": {
+                "used_mb": round(memory_info.get('used_memory', 0) / 1024 / 1024, 2),
+                "fragmentation_ratio": memory_info.get('mem_fragmentation_ratio', 0)
+            },
+            "performance": {
+                "total_keys": total_keys,
+                "hit_ratio_percent": round(hit_ratio, 2),
+                "ops_per_sec": stats_info.get('instantaneous_ops_per_sec', 0),
+                "connected_clients": clients_info.get('connected_clients', 0)
+            },
+            "timestamp": pendulum.now().isoformat()
+        }
+        
+        return status
+        
+    except Exception as e:
+        logger.error(f"Error getting Redis status: {e}")
+        return {
+            "status": "error",
+            "error": str(e),
+            "timestamp": pendulum.now().isoformat()
+        }
+    finally:
+        if redis:
+            await redis.close()
+
+
 @app.post("/cache/optimize", summary="Optimize cache memory usage", tags=["Cache", "Monitoring"])
 async def optimize_cache():
     """Optimize cache memory usage without hard limits"""
