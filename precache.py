@@ -139,15 +139,11 @@ async def _update_valid_seasons_metrics(redis_client):
                 PRECACHE_VALID_SEASONS_COUNT.set(len(valid_seasons))
                 
                 # Map sport IDs to names for better readability
-                # sport_names = {
-                #     72: "bandy",
-                #     151: "innebandy", 
-                #     71: "landhockey",
-                #     73: "rinkbandy"
-                # }
                 sport_names = {
                     72: "bandy",
-                    151: "innebandy"
+                    151: "innebandy", 
+                    71: "landhockey",
+                    73: "rinkbandy"
                 }
                 
                 # Update info metric with labels for each season
@@ -218,7 +214,9 @@ async def _update_tournaments_in_season_metrics(redis_client):
                 # Map sport IDs to names for better readability
                 sport_names = {
                     72: "bandy",
-                    151: "innebandy"
+                    151: "innebandy",
+                    71: "landhockey",
+                    73: "rinkbandy"
                 }
                 
                 # Update info metric with labels for each tournament
@@ -385,6 +383,7 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
             changed_match_ids = set()
 
             logger.info(f"Starting precache run {run_id} at {run_timestamp} (iteration {loop_iteration})")
+            logger.info(f"Run {run_id}: Will fetch FRESH data from data.nif.no API and compare with cached data")
         except Exception as loop_init_error:
             logger.error(f"Critical error in precache loop initialization: {loop_init_error}")
             logger.exception(loop_init_error)
@@ -425,6 +424,8 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                 cached_matches = await _get_cached("tournament_matches")
                 cached_team_ids = await _get_cached("unique_team_ids") or []
 
+                logger.info(f"Run {run_id}: Loaded cached data - {len(cached_valid_seasons or [])} seasons, {len(cached_tournaments or [])} tournaments, {len(cached_matches or [])} matches, {len(cached_team_ids)} team IDs")
+
                 # Update cached data size metrics
                 await _update_cached_data_size_metrics(redis_client)
                 
@@ -443,14 +444,14 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                 # Only fetch seasons from 2024+ to reduce API calls and improve performance
                 seasons = []
                 current_year = pendulum.now().year
-                # sport_ids = [72, 151, 71, 73]  # Configurable sport IDs
+                
                 sport_ids = [72, 151]  # Configurable sport IDs
                 
                 # Optimize by only fetching recent years since we filter to 2024+
-                # start_year = max(2024, current_year - 2)  # Only fetch last 2-3 years for efficiency
-                start_year = current_year  # Only fetch last 2-3 years for efficiency
+                start_year = max(2024, current_year - 1)  # Fetch last 2 years for efficiency
                 
                 logger.info(f"Fetching seasons for years {start_year}-{current_year}, sports {sport_ids}")
+                logger.info(f"Run {run_id}: Making API calls to data.nif.no for fresh data (not using cache)")
                 
                 # Use async gathering for parallel requests
                 async def fetch_seasons_for_year_sport(year, sport_id):
@@ -671,12 +672,15 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                 # Always update cache for valid_seasons to ensure consistency
                 valid_seasons_changed = json.dumps(valid_seasons, sort_keys=True) != json.dumps(cached_valid_seasons or [], sort_keys=True)
                 
+                logger.info(f"Run {run_id}: Data comparison - fetched {len(valid_seasons)} valid seasons, cached {len(cached_valid_seasons or [])} valid seasons")
+                logger.info(f"Run {run_id}: Valid seasons changed: {valid_seasons_changed}")
+                
                 # Force update for debugging if we have valid seasons but cache is empty
                 if len(valid_seasons) > 0 and (not cached_valid_seasons or len(cached_valid_seasons) == 0):
                     logger.info(f"Forcing valid_seasons cache update: have {len(valid_seasons)} valid seasons but cache is empty")
                     valid_seasons_changed = True
                 
-                if valid_seasons_changed or True:  # Temporarily always update for debugging
+                if valid_seasons_changed:
                     await redis_client.set(
                         "valid_seasons",
                         json.dumps(
@@ -943,6 +947,9 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                 # Always update cache for tournaments to ensure consistency
                 tournaments_changed = json.dumps(tournaments, sort_keys=True) != json.dumps(cached_tournaments or [], sort_keys=True)
                 
+                logger.info(f"Run {run_id}: Data comparison - fetched {len(tournaments)} tournaments, cached {len(cached_tournaments or [])} tournaments")
+                logger.info(f"Run {run_id}: Tournaments changed: {tournaments_changed}")
+                
                 if tournaments_changed:
                     await redis_client.set(
                         "tournaments_in_season",
@@ -1031,6 +1038,9 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                 matches_changed = json.dumps(matches, sort_keys=True) != json.dumps(
                     cached_matches or [], sort_keys=True
                 )
+                
+                logger.info(f"Run {run_id}: Data comparison - fetched {len(matches)} matches, cached {len(cached_matches or [])} matches")
+                logger.info(f"Run {run_id}: Matches changed: {matches_changed}")
                 
                 changed_match_ids = set()
                 changed_tournament_ids = set()
@@ -1243,6 +1253,7 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                 # Log summary of this run
                 total_changes = sum(changes_detected.values())
                 logger.info(f"Run {run_id} completed: {total_changes} total changes across {len(changes_detected)} categories in {(end_time - start_time).total_seconds():.2f}s")
+                logger.info(f"Run {run_id} summary: Made {sum(api_calls.values())} API calls to data.nif.no, found changes: {changes_detected}")
                 
                 log_item = {
                     "action": "pre_cache_process",
