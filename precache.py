@@ -1136,6 +1136,9 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                 # Fetch tournament matches for root tournaments - COMMENTED OUT
                 # get data with calls to /api/v1/ta/TournamentMatches?tournamentId={tournamentId} based on root_tournaments only
                 matches = []
+                tournament_matches_calls = 0
+                successful_tournament_matches_calls = 0
+                
                 for tournament in root_tournaments:
                     tournament_id = tournament.get("tournamentId")
                     if not tournament_id:
@@ -1146,12 +1149,13 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                         
                         # Track the API call
                         _track_api_call(url, "GET", params)
+                        tournament_matches_calls += 1
                         
                         resp = await client.get(url, headers=headers, params=params)
-                        PRECACHE_API_CALLS.labels(call_type="matches").inc()
                         
                         # store raw response for detecting changes
                         if resp.status_code < 400:
+                            successful_tournament_matches_calls += 1
                             try:
                                 raw_response = resp.json()
                                 tournament_matches = raw_response.get("matches", [])
@@ -1184,6 +1188,16 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                     except Exception as e:
                         logger.error(f"Error fetching matches for tournament {tournament_id}: {e}")
                         _update_upstream_status("DOWN") 
+                
+                # Update API call tracking for tournament matches
+                api_calls["tournament_matches"] = tournament_matches_calls
+                if tournament_matches_calls > 0:
+                    success_rate = (successful_tournament_matches_calls / tournament_matches_calls) * 100
+                    PRECACHE_API_CALL_SUCCESS_RATE.labels(call_type="tournament_matches").set(success_rate)
+                    logger.info(f"Tournament matches API calls: {successful_tournament_matches_calls}/{tournament_matches_calls} successful ({success_rate:.1f}%)")
+                
+                # Record the total number of calls made
+                PRECACHE_API_CALLS.labels(call_type="tournament_matches").inc(tournament_matches_calls)
                 
 
 
