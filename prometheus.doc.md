@@ -310,6 +310,48 @@ The precache system periodically fetches season, tournament, match and team data
     -   Set up alerting for low success rates
     -   Optimize retry strategies
 
+### `precache_upstream_status`
+
+-   **Type**: Gauge
+-   **Description**: Status of upstream data.nif.no API health - tracks API availability and data quality
+-   **Labels**:
+    -   `endpoint`: Upstream API endpoint (currently "data.nif.no")
+-   **Value**:
+    -   `1` = UP (API responding with valid data)
+    -   `0` = DOWN (API issues, empty responses, or errors)
+-   **Update Triggers**:
+    -   Set to DOWN on empty/null API responses
+    -   Set to DOWN on HTTP errors (4xx/5xx status codes)
+    -   Set to DOWN on network/connection errors
+    -   Set to DOWN on JSON parsing errors
+    -   Set to DOWN on critical precache failures
+    -   Set to UP on successful data retrieval
+    -   Confirmed UP at successful precache run completion
+-   **Use Cases**:
+    -   Monitor upstream API health and availability
+    -   Create uptime dashboards and reports
+    -   Set up alerts for upstream API issues
+    -   Track correlation between upstream problems and cache misses
+    -   SLA monitoring and reporting
+    -   Incident detection and root cause analysis
+
+### `precache_api_urls_called`
+
+-   **Type**: Gauge
+-   **Description**: URLs called to data.nif.no API during precache runs - tracks detailed API call information per run
+-   **Labels**:
+    -   `run_id`: Unique 8-character identifier for this precache run
+    -   `url_path`: API path that was called (without base URL)
+    -   `method`: HTTP method used (typically "GET")
+    -   `params`: JSON string of parameters passed to the API call
+-   **Value**: Always 1 (indicates the API call was made)
+-   **Use Cases**:
+    -   Track which specific API endpoints are called during precache
+    -   Monitor API call patterns and frequency
+    -   Debug precache API interactions
+    -   Analyze parameter usage patterns
+    -   Correlate API calls with changes detected
+
 ---
 
 ## Time-Series Change Tracking
@@ -776,6 +818,11 @@ Returns a dictionary with current time labels:
 -   **`category`**: Data category for change detection ("valid_seasons", "tournaments_in_season", "tournament_matches", "unique_team_ids")
 -   **`call_type`**: Type of API call during precache ("seasons", "tournaments", "matches")
 -   **`item_type`**: Type of data items processed ("seasons", "tournaments", "matches", "teams")
+-   **`endpoint`**: Upstream API endpoint for status monitoring (currently "data.nif.no")
+-   **`run_id`**: Unique 8-character identifier for precache runs
+-   **`url_path`**: API path called during precache (without base URL)
+-   **`method`**: HTTP method used for API calls (typically "GET")
+-   **`params`**: JSON string of parameters passed to API calls
 -   **`season_id`**: Unique season identifier
 -   **`season_name`**: Season name (truncated to 50 characters)
 -   **`season_year`**: Year extracted from seasonDateFrom
@@ -959,6 +1006,26 @@ precache_api_call_success_rate
 
 ```promql
 precache_api_call_success_rate < 90
+```
+
+**Upstream API Status:**
+
+```promql
+# Current upstream status (1=UP, 0=DOWN)
+precache_upstream_status
+
+# Upstream uptime percentage over time
+avg_over_time(precache_upstream_status[1h]) * 100
+
+# Time since upstream went down (seconds)
+(time() - precache_upstream_status == 0) * on() group_left()
+  (time() - on() max_over_time((precache_upstream_status == 0)[24h:1m]))
+
+# Detect upstream status changes
+changes(precache_upstream_status[1h])
+
+# Upstream downtime duration
+(1 - precache_upstream_status) * time()
 ```
 
 **Data Changes Over Time (Including Clears):**
@@ -1208,6 +1275,45 @@ rate(precache_duration_seconds_sum[5m]) / rate(precache_duration_seconds_count[5
       description: '{{ $value }} precache runs failed in the last 30 minutes'
 ```
 
+**Upstream API Down:**
+
+```yaml
+- alert: UpstreamAPIDown
+  expr: precache_upstream_status == 0
+  for: 2m
+  labels:
+      severity: critical
+  annotations:
+      summary: 'Upstream data.nif.no API is DOWN'
+      description: 'Upstream API {{ $labels.endpoint }} has been marked as DOWN for {{ $for }}'
+```
+
+**Upstream API Flapping:**
+
+```yaml
+- alert: UpstreamAPIFlapping
+  expr: changes(precache_upstream_status[10m]) > 4
+  for: 0m
+  labels:
+      severity: warning
+  annotations:
+      summary: 'Upstream API status is flapping'
+      description: 'Upstream API {{ $labels.endpoint }} status changed {{ $value }} times in 10 minutes'
+```
+
+**Low Upstream Uptime:**
+
+```yaml
+- alert: LowUpstreamUptime
+  expr: avg_over_time(precache_upstream_status[1h]) * 100 < 95
+  for: 5m
+  labels:
+      severity: warning
+  annotations:
+      summary: 'Low upstream API uptime'
+      description: 'Upstream API {{ $labels.endpoint }} uptime is {{ $value | printf "%.1f" }}% over last hour'
+```
+
 ---
 
 ## Metric Collection Frequency
@@ -1245,12 +1351,13 @@ This dual approach ensures both real-time accuracy for live monitoring and compr
 
 ## Dashboard Recommendations
 
-1. **Overview Dashboard**: Current cache size, hit rate, request volume, precache health
+1. **Overview Dashboard**: Current cache size, hit rate, request volume, precache health, upstream status
 2. **Performance Dashboard**: Request latency, endpoint performance, error rates, precache duration
 3. **Trends Dashboard**: Daily/weekly patterns, growth trends, seasonal analysis, data change patterns
 4. **Detailed Analysis**: Per-endpoint metrics, cache efficiency, optimization opportunities
 5. **Precache Monitoring**: Precache success rates, data freshness, API usage, change detection patterns
 6. **Time-Series Change Tracking**: Per-run change analysis, change trends over time, anomaly detection
+7. **Upstream Monitoring**: API uptime tracking, service health correlation, incident analysis
 
 ### Suggested Dashboard Panels
 
@@ -1260,6 +1367,7 @@ This dual approach ensures both real-time accuracy for live monitoring and compr
 -   Precache last run timestamp and success rate
 -   Request volume and error rates
 -   Active endpoints count
+-   **Upstream API status indicator (UP/DOWN)**
 
 **Precache Health:**
 
@@ -1267,6 +1375,7 @@ This dual approach ensures both real-time accuracy for live monitoring and compr
 -   Time since last run
 -   Changes detected by category
 -   API calls by type
+-   **Upstream API status timeline**
 -   Precache duration trends
 -   Cached data size monitoring
 
@@ -1309,7 +1418,76 @@ This dual approach ensures both real-time accuracy for live monitoring and compr
 -   System health indicators
 -   Alert status dashboard
 
+**Upstream API Monitoring:**
+
+-   **Current Status Indicator**: Single stat panel showing `precache_upstream_status` (1=UP/Green, 0=DOWN/Red)
+-   **Uptime Percentage**: `avg_over_time(precache_upstream_status[24h]) * 100` over time
+-   **Status Timeline**: State timeline showing UP/DOWN periods over time
+-   **Status Change Events**: `changes(precache_upstream_status[6h])` to track instability
+-   **Correlation Analysis**: Overlay upstream status with precache failures and cache miss rates
+-   **SLA Tracking**: Monthly/weekly uptime percentages and downtime duration
+
 ### Grafana Dashboard JSON Examples
+
+**Upstream Status Panel Configuration:**
+
+```json
+{
+    "title": "Upstream API Status",
+    "type": "stat",
+    "targets": [
+        {
+            "expr": "precache_upstream_status",
+            "legendFormat": "{{ endpoint }}"
+        }
+    ],
+    "fieldConfig": {
+        "defaults": {
+            "color": {
+                "mode": "thresholds"
+            },
+            "thresholds": {
+                "steps": [
+                    { "color": "red", "value": 0 },
+                    { "color": "green", "value": 1 }
+                ]
+            },
+            "mappings": [
+                { "options": { "0": { "text": "DOWN" } }, "type": "value" },
+                { "options": { "1": { "text": "UP" } }, "type": "value" }
+            ]
+        }
+    }
+}
+```
+
+**Uptime Timeline Panel Configuration:**
+
+```json
+{
+    "title": "Upstream API Status Timeline",
+    "type": "state-timeline",
+    "targets": [
+        {
+            "expr": "precache_upstream_status",
+            "legendFormat": "{{ endpoint }}"
+        }
+    ],
+    "fieldConfig": {
+        "defaults": {
+            "color": {
+                "mode": "thresholds"
+            },
+            "thresholds": {
+                "steps": [
+                    { "color": "red", "value": 0 },
+                    { "color": "green", "value": 1 }
+                ]
+            }
+        }
+    }
+}
+```
 
 **Time-Series Change Panel Configuration:**
 
