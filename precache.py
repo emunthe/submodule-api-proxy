@@ -479,11 +479,6 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                         log_dir = "logs/precache_debug_logs"
                         os.makedirs(log_dir, exist_ok=True)
                         
-                        # Create filename with timestamp and run_id
-                        timestamp = pendulum.now().format("YYYY-MM-DD_HH-mm-ss")
-                        filename = f"{cache_name}_{timestamp}_{run_id}.log"
-                        filepath = os.path.join(log_dir, filename)
-                        
                         # Prepare log data
                         log_entry = {
                             "run_id": run_id,
@@ -494,21 +489,12 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                             "data": data
                         }
                         
-                        # Write to file
-                        with open(filepath, 'w', encoding='utf-8') as f:
+                        # Write directly to the "latest" file (no timestamped versions)
+                        latest_filepath = os.path.join(log_dir, f"{cache_name}_latest.log")
+                        with open(latest_filepath, 'w', encoding='utf-8') as f:
                             json.dump(log_entry, f, indent=2, ensure_ascii=False, default=str)
                         
-                        logger.debug(f"Run {run_id}: Logged {cache_name} cache data to {filepath} ({log_entry['data_count']} items)")
-                        
-                        # Also create/update a "latest" symlink for easy access
-                        latest_filepath = os.path.join(log_dir, f"{cache_name}_latest.log")
-                        try:
-                            if os.path.exists(latest_filepath) or os.path.islink(latest_filepath):
-                                os.remove(latest_filepath)
-                            os.symlink(filename, latest_filepath)
-                        except Exception as symlink_error:
-                            # Symlink creation might fail on some systems, just copy the file instead
-                            shutil.copy2(filepath, latest_filepath)
+                        logger.debug(f"Run {run_id}: Logged {cache_name} cache data to {latest_filepath} ({log_entry['data_count']} items)")
                             
                     except Exception as e:
                         logger.warning(f"Failed to log {cache_name} cache data to file: {e}")
