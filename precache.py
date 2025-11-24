@@ -109,20 +109,6 @@ async def _update_cached_data_size_metrics(redis_client):
             "unique_team_ids": "unique_team_ids"
         }
         
-        # Add individual season tournament cache keys
-        try:
-            # Get all keys that match the season tournament pattern
-            season_tournament_keys = []
-            async for key in redis_client.scan_iter(match="tournaments_season_*"):
-                season_tournament_keys.append(key)
-            
-            # Add individual season caches to metrics
-            for key in season_tournament_keys:
-                cache_keys[f"season_cache_{key}"] = key
-                
-        except Exception as e:
-            logger.debug(f"Could not scan for season tournament cache keys: {e}")
-        
         for data_type, redis_key in cache_keys.items():
             raw_data = await redis_client.get(redis_key)
             if raw_data:
