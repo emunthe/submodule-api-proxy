@@ -97,6 +97,12 @@ PRECACHE_TOURNAMENTS_IN_SEASON_INFO = Gauge(
     ["tournament_id", "tournament_name", "season_id", "sport_id", "is_root"]
 )
 
+PRECACHE_API_URLS_CALLED = Gauge(
+    "precache_api_urls_called",
+    "URLs called to data.nif.no API during precache runs - tracks detailed API call information per run",
+    ["run_id", "url_path", "method", "params"]
+)
+
 
 async def _update_cached_data_size_metrics(redis_client):
     """Update metrics for the size of cached data"""
@@ -376,6 +382,7 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
             run_id = str(uuid.uuid4())[:8]  # Short unique ID for this run
             run_timestamp = start_time.isoformat()
             api_calls = {"seasons": 0, "tournaments": 0, "matches": 0}
+            api_urls_called = []  # Track all URLs called during this run
             changes_detected = {}
             # Ensure these are defined even if related blocks are commented out
             changed_tournament_ids = set()
@@ -409,6 +416,33 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                             category=category
                         ).set(count)
                         logger.info(f"Run {run_id}: Detected {count} changes in {category}")
+
+                def _track_api_call(url, method="GET", params=None):
+                    """Helper function to track API calls for metrics and logging"""
+                    try:
+                        # Extract just the path from the URL for cleaner metrics
+                        url_path = url.replace(config.API_URL, "") if config.API_URL in url else url
+                        params_str = json.dumps(params or {}, sort_keys=True)
+                        
+                        # Record in metrics
+                        PRECACHE_API_URLS_CALLED.labels(
+                            run_id=run_id,
+                            url_path=url_path,
+                            method=method,
+                            params=params_str
+                        ).set(1)
+                        
+                        # Add to tracking list for logging
+                        api_urls_called.append({
+                            "url": url,
+                            "method": method,
+                            "params": params,
+                            "timestamp": pendulum.now().isoformat()
+                        })
+                        
+                        logger.debug(f"Run {run_id}: API call tracked - {method} {url_path}")
+                    except Exception as e:
+                        logger.error(f"Error tracking API call {url}: {e}")
 
                 async def _get_cached(key):
                     raw = await redis_client.get(key)
@@ -457,12 +491,16 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                 async def fetch_seasons_for_year_sport(year, sport_id):
                     try:
                         url = f"{config.API_URL}/api/v1/ta/Seasons/"
+                        params = {"year": year, "sportId": sport_id}
                         logger.debug(f"Fetching seasons for year {year}, sport {sport_id}")
+                        
+                        # Track the API call
+                        _track_api_call(url, "GET", params)
                         
                         resp = await client.get(
                             url,
                             headers=headers,
-                            params={"year": year, "sportId": sport_id},
+                            params=params,
                         )
                         
                         # Track API call metrics
@@ -744,9 +782,13 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                                 return {"tournaments_in_season": [], "root_tournaments": [], "success": False}
                                 
                             url = f"{config.API_URL}/api/v1/ta/Tournament/Season/{season_id}/"
+                            params = {"hierarchy": True}
                             logger.debug(f"Fetching tournaments for season {season_id}")
                             
-                            resp = await client.get(url, headers=headers, params={"hierarchy": True})
+                            # Track the API call
+                            _track_api_call(url, "GET", params)
+                            
+                            resp = await client.get(url, headers=headers, params=params)
                             PRECACHE_API_CALLS.labels(call_type="tournaments").inc()
                             
                             if resp.status_code < 400:
@@ -1002,7 +1044,12 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                         continue
                     try:
                         url = f"{config.API_URL}/api/v1/ta/TournamentMatches"
-                        resp = await client.get(url, headers=headers, params={"tournamentId": tournament_id})
+                        params = {"tournamentId": tournament_id}
+                        
+                        # Track the API call
+                        _track_api_call(url, "GET", params)
+                        
+                        resp = await client.get(url, headers=headers, params=params)
                         PRECACHE_API_CALLS.labels(call_type="matches").inc()
                         
                         # store raw response for detecting changes
@@ -1255,12 +1302,22 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                 logger.info(f"Run {run_id} completed: {total_changes} total changes across {len(changes_detected)} categories in {(end_time - start_time).total_seconds():.2f}s")
                 logger.info(f"Run {run_id} summary: Made {sum(api_calls.values())} API calls to data.nif.no, found changes: {changes_detected}")
                 
+                # Log all API URLs called during this run
+                if api_urls_called:
+                    logger.info(f"Run {run_id}: All API URLs called ({len(api_urls_called)} total):")
+                    for i, call in enumerate(api_urls_called, 1):
+                        params_str = f" with params {call['params']}" if call['params'] else ""
+                        logger.info(f"  {i}. {call['method']} {call['url']}{params_str}")
+                else:
+                    logger.info(f"Run {run_id}: No API URLs were called during this run")
+                
                 log_item = {
                     "action": "pre_cache_process",
                     "start_time": start_time.isoformat(),
                     "end_time": end_time.isoformat(),
                     "process_time_seconds": (end_time - start_time).total_seconds(),
                     "api_calls_made": api_calls,
+                    "api_urls_called": api_urls_called,
                     "changes_detected": {k: int(v) for k, v in changes_detected.items()},
                     "run_id": run_id,
                     "total_changes": total_changes
@@ -1284,6 +1341,20 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                         run_timestamp=run_timestamp,
                         category=category
                     ).set(-1)  # -1 indicates error
+                
+                # Clear URL metrics for this run in case of error
+                try:
+                    # Clear any partial URL metrics for this run_id
+                    pass  # The PRECACHE_API_URLS_CALLED metric will naturally expire
+                except Exception as cleanup_error:
+                    logger.debug(f"Error during metric cleanup: {cleanup_error}")
+                
+                # Log any API calls made before the error
+                if 'api_urls_called' in locals() and api_urls_called:
+                    logger.warning(f"Run {run_id} failed after making {len(api_urls_called)} API calls:")
+                    for i, call in enumerate(api_urls_called, 1):
+                        params_str = f" with params {call['params']}" if call['params'] else ""
+                        logger.warning(f"  {i}. {call['method']} {call['url']}{params_str}")
                 
                 logger.error(f"Run {run_id} failed: {e}")
                 logger.error(f"Error in detect_change_tournaments_and_matches: {e}")
