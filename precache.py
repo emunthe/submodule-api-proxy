@@ -4,6 +4,8 @@
 import asyncio
 import json
 import os
+import re
+import shutil
 import uuid
 from datetime import datetime
 
@@ -102,6 +104,12 @@ PRECACHE_API_URLS_CALLED = Gauge(
     "precache_api_urls_called",
     "URLs called to data.nif.no API during precache runs - tracks detailed API call information per run",
     ["run_id", "url_path", "method", "params"]
+)
+
+PRECACHE_UPSTREAM_STATUS = Gauge(
+    "precache_upstream_status",
+    "Status of upstream data.nif.no API - 1 for UP, 0 for DOWN",
+    ["endpoint"]  # data.nif.no
 )
 
 
@@ -389,6 +397,9 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
             changed_tournament_ids = set()
             changed_team_ids = []
             changed_match_ids = set()
+            
+            # Initialize upstream status tracking - assume UP until proven DOWN
+            upstream_status = "UP"
 
             logger.info(f"Starting precache run {run_id} at {run_timestamp} (iteration {loop_iteration})")
             logger.info(f"Run {run_id}: Will fetch FRESH data from data.nif.no API and compare with cached data")
@@ -445,6 +456,22 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                     except Exception as e:
                         logger.error(f"Error tracking API call {url}: {e}")
 
+                def _update_upstream_status(status_value):
+                    """Helper function to update upstream API status"""
+                    nonlocal upstream_status
+                    try:
+                        if status_value == "DOWN":
+                            upstream_status = "DOWN"
+                            PRECACHE_UPSTREAM_STATUS.labels(endpoint="data.nif.no").set(0)
+                            logger.warning(f"Run {run_id}: Upstream API status set to DOWN")
+                        elif status_value == "UP" and upstream_status != "DOWN":
+                            # Only set to UP if not already marked as DOWN
+                            upstream_status = "UP"
+                            PRECACHE_UPSTREAM_STATUS.labels(endpoint="data.nif.no").set(1)
+                            logger.debug(f"Run {run_id}: Upstream API status confirmed as UP")
+                    except Exception as e:
+                        logger.error(f"Error updating upstream status: {e}")
+
                 def _log_cache_data_to_file(cache_name, data, run_id):
                     """Helper function to log cache data to debug files"""
                     try:
@@ -481,7 +508,6 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                             os.symlink(filename, latest_filepath)
                         except Exception as symlink_error:
                             # Symlink creation might fail on some systems, just copy the file instead
-                            import shutil
                             shutil.copy2(filepath, latest_filepath)
                             
                     except Exception as e:
@@ -561,6 +587,15 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                                 raw = resp.json()
                                 data = raw.get("seasons", [])
                                 
+                                # Check if data is null or empty - indicates upstream issue
+                                if not data or (isinstance(data, list) and len(data) == 0):
+                                    logger.warning(f"Empty or null seasons data for year={year} sport={sport_id}")
+                                    _update_upstream_status("DOWN")
+                                    return []
+                                else:
+                                    # Data received successfully
+                                    _update_upstream_status("UP")
+                                
                                 # Normalize data structure
                                 if isinstance(data, dict):
                                     return [data]
@@ -570,19 +605,23 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                                     logger.warning(
                                         f"Unexpected seasons data type for year={year} sport={sport_id}: {type(data).__name__}"
                                     )
+                                    _update_upstream_status("DOWN")
                                     return []
                                     
                             except Exception as e:
                                 logger.warning(
                                     f"Failed to parse seasons response for year={year} sport={sport_id}: {e}"
                                 )
+                                _update_upstream_status("DOWN")
                                 return []
                         else:
                             logger.warning(f"API request failed for year={year} sport={sport_id}: {resp.status_code}")
+                            _update_upstream_status("DOWN")
                             return []
                             
                     except Exception as e:
                         logger.error(f"Error fetching seasons for year={year} sport={sport_id}: {e}")
+                        _update_upstream_status("DOWN")
                         return []
                 
                 # Create tasks for parallel execution
@@ -624,10 +663,13 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                 # log the final seasons fetched
                 logger.info(f"Total seasons fetched: {len(seasons)}")
                 
+                # Update upstream status based on seasons fetch results
                 if len(seasons) == 0:
                     logger.warning("No seasons were fetched from any API calls - this may indicate API issues or no data available")
+                    _update_upstream_status("DOWN")
                 elif len(seasons) < 5:
                     logger.warning(f"Very few seasons fetched ({len(seasons)}) - this may indicate API issues")
+                    _update_upstream_status("DOWN")
                     # Log all seasons when we have very few
                     for i, season in enumerate(seasons):
                         logger.info(f"Season {i+1}: {season}")
@@ -637,6 +679,7 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                     for i in range(min(3, len(seasons))):
                         season = seasons[i]
                         logger.info(f"Season {i+1}: ID={season.get('seasonId')}, name='{season.get('seasonName')}', sport={season.get('sportId')}, dateFrom={season.get('seasonDateFrom')}")
+                    _update_upstream_status("UP")
 
                 # Filter seasons to get valid ones with improved logic
                 valid_seasons = []
@@ -848,6 +891,16 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                                 try:
                                     raw_response = resp.json()
                                     data = raw_response.get("tournamentsInSeason", [])
+                                    
+                                    # Check if data is null or empty - indicates upstream issue
+                                    if not data or (isinstance(data, list) and len(data) == 0):
+                                        logger.warning(f"Empty or null tournaments data for season {season_id}")
+                                        _update_upstream_status("DOWN")
+                                        return {"tournaments_in_season": [], "root_tournaments": [], "success": False}
+                                    else:
+                                        # Data received successfully
+                                        _update_upstream_status("UP")
+                                    
                                     tournaments_for_season = []
                                     root_tournaments_for_season = []
                                     
@@ -890,13 +943,16 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                                     
                                 except Exception as e:
                                     logger.warning(f"Failed to parse tournaments response for season {season_id}: {e}")
+                                    _update_upstream_status("DOWN")
                                     return {"tournaments_in_season": [], "root_tournaments": [], "success": False}
                             else:
                                 logger.warning(f"Tournaments API request failed for season {season_id}: {resp.status_code}")
+                                _update_upstream_status("DOWN")
                                 return {"tournaments_in_season": [], "root_tournaments": [], "success": False}
                                 
                         except Exception as e:
                             logger.error(f"Error fetching tournaments for season {season.get('seasonId', 'unknown')}: {e}")
+                            _update_upstream_status("DOWN")
                             return {"tournaments_in_season": [], "root_tournaments": [], "success": False}
 
                     async def ensure_cache_entries_for_api_paths(tournaments_list):
@@ -931,7 +987,6 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                                     
                                     # Parse URL to extract season_id for the params
                                     # API path format: https://data.nif.no/api/v1/ta/Tournament/Season/{season_id}/?hierarchy=true
-                                    import re
                                     season_match = re.search(r'/Tournament/Season/(\d+)/', api_path)
                                     if season_match:
                                         season_id = season_match.group(1)
@@ -1092,46 +1147,57 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                 
                 
                 # -----------------------------------------------------------------
-                # Fetch tournament matches for root tournaments
+                # Fetch tournament matches for root tournaments - COMMENTED OUT
                 # get data with calls to /api/v1/ta/TournamentMatches?tournamentId={tournamentId} based on root_tournaments only
                 matches = []
-                for tournament in root_tournaments:
-                    tournament_id = tournament.get("tournamentId")
-                    if not tournament_id:
-                        continue
-                    try:
-                        url = f"{config.API_URL}/api/v1/ta/TournamentMatches"
-                        params = {"tournamentId": tournament_id}
-                        
-                        # Track the API call
-                        _track_api_call(url, "GET", params)
-                        
-                        resp = await client.get(url, headers=headers, params=params)
-                        PRECACHE_API_CALLS.labels(call_type="matches").inc()
-                        
-                        # store raw response for detecting changes
-                        if resp.status_code < 400:
-                            try:
-                                raw_response = resp.json()
-                                tournament_matches = raw_response.get("matches", [])
-                                
-                                for match in tournament_matches:
-                                    # Validate match structure
-                                    if not isinstance(match, dict) or not match.get("matchId"):
-                                        logger.debug(f"Skipping invalid match data: {match}")
-                                        continue
-                                    
-                                    match["apiPath"] = url
-                                    match["tournamentId"] = tournament_id
-                                    matches.append(match)
-                                
-                                logger.debug(f"Fetched {len(tournament_matches)} matches for tournament {tournament_id}")
-                            except Exception as e:
-                                logger.warning(f"Failed to parse matches response for tournament {tournament_id}: {e}")
-                        else:
-                            logger.warning(f"Matches API request failed for tournament {tournament_id}: {resp.status_code}")
-                    except Exception as e:
-                        logger.error(f"Error fetching matches for tournament {tournament_id}: {e}") 
+                # for tournament in root_tournaments:
+                #     tournament_id = tournament.get("tournamentId")
+                #     if not tournament_id:
+                #         continue
+                #     try:
+                #         url = f"{config.API_URL}/api/v1/ta/TournamentMatches"
+                #         params = {"tournamentId": tournament_id}
+                #         
+                #         # Track the API call
+                #         _track_api_call(url, "GET", params)
+                #         
+                #         resp = await client.get(url, headers=headers, params=params)
+                #         PRECACHE_API_CALLS.labels(call_type="matches").inc()
+                #         
+                #         # store raw response for detecting changes
+                #         if resp.status_code < 400:
+                #             try:
+                #                 raw_response = resp.json()
+                #                 tournament_matches = raw_response.get("matches", [])
+                #                 
+                #                 # Check if matches data is null or empty for this tournament
+                #                 if not tournament_matches or (isinstance(tournament_matches, list) and len(tournament_matches) == 0):
+                #                     logger.debug(f"No matches found for tournament {tournament_id} (this may be normal)")
+                #                     # Don't mark as DOWN for empty matches as tournaments may legitimately have no matches
+                #                 else:
+                #                     # Data received successfully
+                #                     _update_upstream_status("UP")
+                #                 
+                #                 for match in tournament_matches:
+                #                     # Validate match structure
+                #                     if not isinstance(match, dict) or not match.get("matchId"):
+                #                         logger.debug(f"Skipping invalid match data: {match}")
+                #                         continue
+                #                     
+                #                     match["apiPath"] = url
+                #                     match["tournamentId"] = tournament_id
+                #                     matches.append(match)
+                #                 
+                #                 logger.debug(f"Fetched {len(tournament_matches)} matches for tournament {tournament_id}")
+                #             except Exception as e:
+                #                 logger.warning(f"Failed to parse matches response for tournament {tournament_id}: {e}")
+                #                 _update_upstream_status("DOWN")
+                #         else:
+                #             logger.warning(f"Matches API request failed for tournament {tournament_id}: {resp.status_code}")
+                #             _update_upstream_status("DOWN")
+                #     except Exception as e:
+                #         logger.error(f"Error fetching matches for tournament {tournament_id}: {e}")
+                #         _update_upstream_status("DOWN") 
                 
 
 
@@ -1364,6 +1430,11 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                 total_changes = sum(changes_detected.values())
                 logger.info(f"Run {run_id} completed: {total_changes} total changes across {len(changes_detected)} categories in {(end_time - start_time).total_seconds():.2f}s")
                 logger.info(f"Run {run_id} summary: Made {sum(api_calls.values())} API calls to data.nif.no, found changes: {changes_detected}")
+                logger.info(f"Run {run_id} upstream status: {upstream_status}")
+                
+                # Final upstream status update - if we made it this far with UP status, confirm it
+                if upstream_status == "UP":
+                    _update_upstream_status("UP")
                 
                 # Log all API URLs called during this run
                 if api_urls_called:
@@ -1383,7 +1454,8 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                     "api_urls_called": api_urls_called,
                     "changes_detected": {k: int(v) for k, v in changes_detected.items()},
                     "run_id": run_id,
-                    "total_changes": total_changes
+                    "total_changes": total_changes,
+                    "upstream_status": upstream_status
                 }
                 logger.info(f"logProcess: {json.dumps(log_item, ensure_ascii=False)}")
                 
@@ -1392,6 +1464,10 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                 # will persist for the configured scrape intervals to allow graphing
 
             except Exception as e:
+                # Set upstream status to DOWN on any critical error
+                PRECACHE_UPSTREAM_STATUS.labels(endpoint="data.nif.no").set(0)
+                logger.error(f"Run {run_id} failed - upstream status set to DOWN due to error")
+                
                 # Record failed run
                 PRECACHE_RUNS_TOTAL.labels(status="error").inc()
                 
