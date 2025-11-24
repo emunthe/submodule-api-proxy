@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+import os
 import uuid
 from datetime import datetime
 
@@ -444,6 +445,48 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                     except Exception as e:
                         logger.error(f"Error tracking API call {url}: {e}")
 
+                def _log_cache_data_to_file(cache_name, data, run_id):
+                    """Helper function to log cache data to debug files"""
+                    try:
+                        # Create logs directory if it doesn't exist
+                        log_dir = "/tmp/precache_debug_logs"
+                        os.makedirs(log_dir, exist_ok=True)
+                        
+                        # Create filename with timestamp and run_id
+                        timestamp = pendulum.now().format("YYYY-MM-DD_HH-mm-ss")
+                        filename = f"{cache_name}_{timestamp}_{run_id}.log"
+                        filepath = os.path.join(log_dir, filename)
+                        
+                        # Prepare log data
+                        log_entry = {
+                            "run_id": run_id,
+                            "timestamp": pendulum.now().isoformat(),
+                            "cache_name": cache_name,
+                            "data_type": type(data).__name__,
+                            "data_count": len(data) if data and hasattr(data, '__len__') else 0,
+                            "data": data
+                        }
+                        
+                        # Write to file
+                        with open(filepath, 'w', encoding='utf-8') as f:
+                            json.dump(log_entry, f, indent=2, ensure_ascii=False, default=str)
+                        
+                        logger.debug(f"Run {run_id}: Logged {cache_name} cache data to {filepath} ({log_entry['data_count']} items)")
+                        
+                        # Also create/update a "latest" symlink for easy access
+                        latest_filepath = os.path.join(log_dir, f"{cache_name}_latest.log")
+                        try:
+                            if os.path.exists(latest_filepath) or os.path.islink(latest_filepath):
+                                os.remove(latest_filepath)
+                            os.symlink(filename, latest_filepath)
+                        except Exception as symlink_error:
+                            # Symlink creation might fail on some systems, just copy the file instead
+                            import shutil
+                            shutil.copy2(filepath, latest_filepath)
+                            
+                    except Exception as e:
+                        logger.warning(f"Failed to log {cache_name} cache data to file: {e}")
+
                 async def _get_cached(key):
                     raw = await redis_client.get(key)
                     if not raw:
@@ -458,6 +501,13 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                 cached_matches = await _get_cached("tournament_matches")
                 cached_team_ids = await _get_cached("unique_team_ids") or []
 
+                # Log cached data to debug files
+                _log_cache_data_to_file("valid_seasons", cached_valid_seasons, run_id)
+                _log_cache_data_to_file("tournaments_in_season", cached_tournaments, run_id)
+                _log_cache_data_to_file("tournament_matches", cached_matches, run_id)
+                _log_cache_data_to_file("unique_team_ids", cached_team_ids, run_id)
+
+                logger.info(f"Run {run_id}: Cached data logged to debug files in /tmp/precache_debug_logs/")
                 logger.info(f"Run {run_id}: Loaded cached data - {len(cached_valid_seasons or [])} seasons, {len(cached_tournaments or [])} tournaments, {len(cached_matches or [])} matches, {len(cached_team_ids)} team IDs")
 
                 # Update cached data size metrics
@@ -702,6 +752,9 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
 
                 logger.info(f"Season filtering complete - Debug stats: {debug_stats}")
                 logger.info(f"Filtered to {len(valid_seasons)} valid seasons (skipped {invalid_count} invalid)")
+
+                # Log newly fetched valid seasons data to debug file
+                _log_cache_data_to_file("valid_seasons_fetched", valid_seasons, run_id)
 
                 # Update metrics for items processed (both total and filtered)
                 PRECACHE_ITEMS_PROCESSED.labels(item_type="seasons").set(len(seasons))
@@ -982,6 +1035,10 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                     
                     logger.info(f"Fetched {len(tournaments)} tournaments ({len(root_tournaments)} root tournaments)")
 
+                # Log newly fetched tournaments data to debug files
+                _log_cache_data_to_file("tournaments_in_season_fetched", tournaments, run_id)
+                _log_cache_data_to_file("root_tournaments_fetched", root_tournaments, run_id)
+
                 # Update metrics for tournaments processed
                 PRECACHE_ITEMS_PROCESSED.labels(item_type="tournaments").set(len(tournaments))
                 PRECACHE_ITEMS_PROCESSED.labels(item_type="root_tournaments").set(len(root_tournaments))
@@ -1081,6 +1138,9 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                 # Update metrics for matches processed
                 PRECACHE_ITEMS_PROCESSED.labels(item_type="matches").set(len(matches))
 
+                # Log newly fetched matches data to debug file
+                _log_cache_data_to_file("tournament_matches_fetched", matches, run_id)
+
                 # Store raw match data and detect changes
                 matches_changed = json.dumps(matches, sort_keys=True) != json.dumps(
                     cached_matches or [], sort_keys=True
@@ -1169,6 +1229,9 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
 
                 # Update metrics for teams processed
                 PRECACHE_ITEMS_PROCESSED.labels(item_type="teams").set(len(team_ids))
+
+                # Log newly fetched team IDs to debug file
+                _log_cache_data_to_file("unique_team_ids_fetched", list(team_ids), run_id)
 
                 changed_team_ids = []
                 if team_ids != set(cached_team_ids):
