@@ -1445,6 +1445,47 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                 }
                 logger.info(f"logProcess: {json.dumps(log_item, ensure_ascii=False)}")
                 
+                # Save precache run stats to debug file
+                try:
+                    # Create logs directory if it doesn't exist
+                    log_dir = "logs/precache_debug_logs"
+                    os.makedirs(log_dir, exist_ok=True)
+                    
+                    # Save current run stats to the latest file
+                    stats_filepath = os.path.join(log_dir, "precache_run_stats.json")
+                    with open(stats_filepath, 'w', encoding='utf-8') as f:
+                        json.dump(log_item, f, indent=2, ensure_ascii=False, default=str)
+                    
+                    logger.info(f"Run {run_id}: Saved run stats to {stats_filepath}")
+                    
+                    # Also maintain a history file with the last 10 runs
+                    history_filepath = os.path.join(log_dir, "precache_run_history.json")
+                    
+                    # Load existing history
+                    run_history = []
+                    if os.path.exists(history_filepath):
+                        try:
+                            with open(history_filepath, 'r', encoding='utf-8') as f:
+                                run_history = json.load(f)
+                        except Exception as e:
+                            logger.warning(f"Could not load existing run history: {e}")
+                            run_history = []
+                    
+                    # Add current run to history
+                    run_history.append(log_item)
+                    
+                    # Keep only last 10 runs
+                    run_history = run_history[-10:]
+                    
+                    # Save updated history
+                    with open(history_filepath, 'w', encoding='utf-8') as f:
+                        json.dump(run_history, f, indent=2, ensure_ascii=False, default=str)
+                    
+                    logger.debug(f"Run {run_id}: Updated run history with {len(run_history)} entries")
+                    
+                except Exception as e:
+                    logger.warning(f"Failed to save precache run stats to file: {e}")
+                
                 # Note: Prometheus metrics will be automatically cleaned up by metric expiration
                 # The PRECACHE_CHANGES_THIS_RUN and PRECACHE_RUN_CHANGES_SUMMARY metrics
                 # will persist for the configured scrape intervals to allow graphing
@@ -1484,6 +1525,63 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                 logger.error(f"Run {run_id} failed: {e}")
                 logger.error(f"Error in detect_change_tournaments_and_matches: {e}")
                 logger.exception(e)
+                
+                # Save error run stats to debug file
+                try:
+                    end_time = pendulum.now()
+                    error_log_item = {
+                        "action": "pre_cache_process",
+                        "start_time": start_time.isoformat(),
+                        "end_time": end_time.isoformat(),
+                        "process_time_seconds": (end_time - start_time).total_seconds(),
+                        "api_calls_made": api_calls if 'api_calls' in locals() else {},
+                        "api_urls_called": api_urls_called if 'api_urls_called' in locals() else [],
+                        "changes_detected": {},
+                        "run_id": run_id,
+                        "total_changes": 0,
+                        "upstream_status": "DOWN",
+                        "error": str(e),
+                        "status": "failed"
+                    }
+                    
+                    # Create logs directory if it doesn't exist
+                    log_dir = "logs/precache_debug_logs"
+                    os.makedirs(log_dir, exist_ok=True)
+                    
+                    # Save error run stats to the latest file
+                    stats_filepath = os.path.join(log_dir, "precache_run_stats.json")
+                    with open(stats_filepath, 'w', encoding='utf-8') as f:
+                        json.dump(error_log_item, f, indent=2, ensure_ascii=False, default=str)
+                    
+                    logger.info(f"Run {run_id}: Saved error run stats to {stats_filepath}")
+                    
+                    # Also add to history file
+                    history_filepath = os.path.join(log_dir, "precache_run_history.json")
+                    
+                    # Load existing history
+                    run_history = []
+                    if os.path.exists(history_filepath):
+                        try:
+                            with open(history_filepath, 'r', encoding='utf-8') as f:
+                                run_history = json.load(f)
+                        except Exception as hist_e:
+                            logger.warning(f"Could not load existing run history: {hist_e}")
+                            run_history = []
+                    
+                    # Add error run to history
+                    run_history.append(error_log_item)
+                    
+                    # Keep only last 10 runs
+                    run_history = run_history[-10:]
+                    
+                    # Save updated history
+                    with open(history_filepath, 'w', encoding='utf-8') as f:
+                        json.dump(run_history, f, indent=2, ensure_ascii=False, default=str)
+                    
+                    logger.debug(f"Run {run_id}: Added error run to history with {len(run_history)} total entries")
+                    
+                except Exception as save_error:
+                    logger.warning(f"Failed to save error run stats to file: {save_error}")
             finally:
                 if client:
                     await client.aclose()
