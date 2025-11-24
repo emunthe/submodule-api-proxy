@@ -449,7 +449,7 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                     """Helper function to log cache data to debug files"""
                     try:
                         # Create logs directory if it doesn't exist
-                        log_dir = "/tmp/precache_debug_logs"
+                        log_dir = "logs/precache_debug_logs"
                         os.makedirs(log_dir, exist_ok=True)
                         
                         # Create filename with timestamp and run_id
