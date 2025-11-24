@@ -63,6 +63,9 @@ token_manager = TokenManager()
 cache_manager = CacheManager(token_manager)
 stats_collector = StatsCollector()
 
+# Global variable to track the precache task
+precache_task = None
+
 
 async def update_cache_metrics_periodically():
     """Periodically update cache size metrics"""
@@ -97,9 +100,10 @@ async def update_cache_metrics_periodically():
 
 @app.on_event("startup")
 async def startup_event():
-    task = asyncio.create_task(detect_change_tournaments_and_matches(cache_manager, token_manager))
-    background_tasks.add(task)
-    task.add_done_callback(background_tasks.discard)
+    global precache_task
+    precache_task = asyncio.create_task(detect_change_tournaments_and_matches(cache_manager, token_manager))
+    background_tasks.add(precache_task)
+    precache_task.add_done_callback(background_tasks.discard)
     
     # Start cache metrics update task
     cache_metrics_task = asyncio.create_task(update_cache_metrics_periodically())
@@ -175,6 +179,79 @@ async def clear_all_cache():
 async def clear_precache():
     """Clear all precache data from Redis."""
     return await clear_precache_data()
+
+
+@app.post(
+    "/stop_precache",
+    summary="Stop precache process",
+    description="Stop the running precache periodic task",
+    tags=["Cache"],
+)
+async def stop_precache():
+    """Stop the running precache task."""
+    global precache_task
+    
+    if precache_task is None:
+        return {
+            "status": "error",
+            "message": "No precache task is currently running"
+        }
+    
+    if precache_task.done():
+        return {
+            "status": "error", 
+            "message": "Precache task is not running (already completed or cancelled)"
+        }
+    
+    # Cancel the task
+    precache_task.cancel()
+    
+    try:
+        # Wait for the task to be cancelled (with a short timeout)
+        await asyncio.wait_for(precache_task, timeout=2.0)
+    except asyncio.CancelledError:
+        # Task was successfully cancelled
+        pass
+    except asyncio.TimeoutError:
+        # Task didn't respond to cancellation quickly
+        pass
+    
+    # Remove from background_tasks set
+    background_tasks.discard(precache_task)
+    precache_task = None
+    
+    return {
+        "status": "success",
+        "message": "Precache task has been stopped"
+    }
+
+
+@app.post(
+    "/start_precache",
+    summary="Start precache process",
+    description="Start the precache periodic task",
+    tags=["Cache"],
+)
+async def start_precache():
+    """Start the precache task."""
+    global precache_task
+    
+    # Check if a task is already running
+    if precache_task is not None and not precache_task.done():
+        return {
+            "status": "error",
+            "message": "A precache task is already running"
+        }
+    
+    # Start a new precache task
+    precache_task = asyncio.create_task(detect_change_tournaments_and_matches(cache_manager, token_manager))
+    background_tasks.add(precache_task)
+    precache_task.add_done_callback(background_tasks.discard)
+    
+    return {
+        "status": "success",
+        "message": "Precache task has been started"
+    }
 
 
 @app.get(
