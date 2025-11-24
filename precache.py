@@ -358,21 +358,39 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
 
     This function fetches data from the DATA.NIF.NO API, compares it to cached data,
     """
+    
+    try:
+        # Log function entry
+        logger.info(f"detect_change_tournaments_and_matches function called with cache_manager={type(cache_manager).__name__}, token_manager={type(token_manager).__name__}")
+    except Exception as e:
+        logger.error(f"Error logging function entry: {e}")
+    
+    loop_iteration = 0
 
     while True:
-        redis_client = None
-        client = None
-        start_time = pendulum.now()
-        run_id = str(uuid.uuid4())[:8]  # Short unique ID for this run
-        run_timestamp = start_time.isoformat()
-        api_calls = {"seasons": 0, "tournaments": 0, "matches": 0}
-        changes_detected = {}
-        # Ensure these are defined even if related blocks are commented out
-        changed_tournament_ids = set()
-        changed_team_ids = []
-        changed_match_ids = set()
+        try:
+            loop_iteration += 1
+            logger.info(f"Starting precache loop iteration {loop_iteration}")
+            
+            redis_client = None
+            client = None
+            start_time = pendulum.now()
+            run_id = str(uuid.uuid4())[:8]  # Short unique ID for this run
+            run_timestamp = start_time.isoformat()
+            api_calls = {"seasons": 0, "tournaments": 0, "matches": 0}
+            changes_detected = {}
+            # Ensure these are defined even if related blocks are commented out
+            changed_tournament_ids = set()
+            changed_team_ids = []
+            changed_match_ids = set()
 
-        logger.info(f"Starting precache run {run_id} at {run_timestamp}")
+            logger.info(f"Starting precache run {run_id} at {run_timestamp} (iteration {loop_iteration})")
+        except Exception as loop_init_error:
+            logger.error(f"Critical error in precache loop initialization: {loop_init_error}")
+            logger.exception(loop_init_error)
+            # Sleep and continue to prevent rapid error loops
+            await asyncio.sleep(30)
+            continue
 
         # Start timing for metrics
         with PRECACHE_DURATION_SECONDS.time():
@@ -1265,4 +1283,6 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                 if redis_client:
                     await redis_client.close()
 
+        logger.info(f"Precache run {run_id} completed, sleeping for 180 seconds before next iteration {loop_iteration + 1}")
         await asyncio.sleep(180)
+        logger.info(f"Sleep completed, starting next precache iteration {loop_iteration + 1}")

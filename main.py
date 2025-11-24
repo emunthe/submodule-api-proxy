@@ -191,38 +191,66 @@ async def stop_precache():
     """Stop the running precache task."""
     global precache_task
     
+    start_time = pendulum.now()
+    logger.info(f"POST /stop_precache called at {start_time.isoformat()}")
+    
     if precache_task is None:
+        error_msg = "No precache task is currently running"
+        logger.warning(f"POST /stop_precache failed: {error_msg}")
         return {
             "status": "error",
-            "message": "No precache task is currently running"
+            "message": error_msg
         }
     
     if precache_task.done():
+        error_msg = "Precache task is not running (already completed or cancelled)"
+        logger.warning(f"POST /stop_precache failed: {error_msg}")
         return {
             "status": "error", 
-            "message": "Precache task is not running (already completed or cancelled)"
+            "message": error_msg
         }
+    
+    # Log task details before cancellation
+    task_id = id(precache_task)
+    logger.info(f"Attempting to cancel precache task with ID {task_id}")
     
     # Cancel the task
     precache_task.cancel()
+    logger.info(f"Cancel signal sent to precache task {task_id}")
     
     try:
         # Wait for the task to be cancelled (with a short timeout)
         await asyncio.wait_for(precache_task, timeout=2.0)
+        logger.info(f"Precache task {task_id} completed gracefully after cancel signal")
     except asyncio.CancelledError:
         # Task was successfully cancelled
+        logger.info(f"Precache task {task_id} was successfully cancelled")
         pass
     except asyncio.TimeoutError:
         # Task didn't respond to cancellation quickly
+        logger.warning(f"Precache task {task_id} did not respond to cancellation within 2 seconds")
         pass
     
     # Remove from background_tasks set
     background_tasks.discard(precache_task)
+    logger.info(f"Precache task {task_id} removed from background_tasks, remaining count: {len(background_tasks)}")
     precache_task = None
+    
+    success_msg = "Precache task has been stopped"
+    logger.info(f"POST /stop_precache completed successfully: {success_msg}")
+    
+    log_item = {
+        "action": "stop_precache_endpoint",
+        "timestamp": start_time.isoformat(),
+        "status": "success", 
+        "task_id": task_id,
+        "background_tasks_count": len(background_tasks)
+    }
+    logger.info(f"logEndpoint: {json.dumps(log_item, ensure_ascii=False)}")
     
     return {
         "status": "success",
-        "message": "Precache task has been stopped"
+        "message": success_msg
     }
 
 
@@ -236,21 +264,44 @@ async def start_precache():
     """Start the precache task."""
     global precache_task
     
+    start_time = pendulum.now()
+    logger.info(f"POST /start_precache called at {start_time.isoformat()}")
+    
     # Check if a task is already running
     if precache_task is not None and not precache_task.done():
+        error_msg = "A precache task is already running"
+        logger.warning(f"POST /start_precache failed: {error_msg}")
         return {
             "status": "error",
-            "message": "A precache task is already running"
+            "message": error_msg
         }
     
     # Start a new precache task
+    logger.info(f"Starting new precache task with detect_change_tournaments_and_matches function")
     precache_task = asyncio.create_task(detect_change_tournaments_and_matches(cache_manager, token_manager))
     background_tasks.add(precache_task)
     precache_task.add_done_callback(background_tasks.discard)
     
+    # Log task creation details
+    task_id = id(precache_task)
+    logger.info(f"Precache task created successfully with ID {task_id}")
+    logger.info(f"Task added to background_tasks, current background_tasks count: {len(background_tasks)}")
+    
+    success_msg = "Precache task has been started"
+    logger.info(f"POST /start_precache completed successfully: {success_msg}")
+    
+    log_item = {
+        "action": "start_precache_endpoint",
+        "timestamp": start_time.isoformat(),
+        "status": "success",
+        "task_id": task_id,
+        "background_tasks_count": len(background_tasks)
+    }
+    logger.info(f"logEndpoint: {json.dumps(log_item, ensure_ascii=False)}")
+    
     return {
         "status": "success",
-        "message": "Precache task has been started"
+        "message": success_msg
     }
 
 
