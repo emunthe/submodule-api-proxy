@@ -456,7 +456,7 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                 # Use async gathering for parallel requests
                 async def fetch_seasons_for_year_sport(year, sport_id):
                     try:
-                        url = f"{config.API_URL}/api/v1/ta/seasons/"
+                        url = f"{config.API_URL}/api/v1/ta/Seasons/"
                         logger.debug(f"Fetching seasons for year {year}, sport {sport_id}")
                         
                         resp = await client.get(
@@ -743,7 +743,7 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                                 logger.warning(f"Season missing seasonId: {season}")
                                 return {"tournaments_in_season": [], "root_tournaments": [], "success": False}
                                 
-                            url = f"{config.API_URL}/api/v1/ta/tournament/season/{season_id}/"
+                            url = f"{config.API_URL}/api/v1/ta/Tournament/Season/{season_id}/"
                             logger.debug(f"Fetching tournaments for season {season_id}")
                             
                             resp = await client.get(url, headers=headers, params={"hierarchy": True})
@@ -1001,7 +1001,7 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                     if not tournament_id:
                         continue
                     try:
-                        url = f"{config.API_URL}/api/v1/ta/tournamentmatches"
+                        url = f"{config.API_URL}/api/v1/ta/TournamentMatches"
                         resp = await client.get(url, headers=headers, params={"tournamentId": tournament_id})
                         PRECACHE_API_CALLS.labels(call_type="matches").inc()
                         
@@ -1195,7 +1195,7 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                         try:
                             # Special handling for MatchTeamMembers endpoint
                             if "matchteammembers" in base_url:
-                                url = f"{config.API_URL}/api/v1/ta/matchteammembers/{match_id}/"
+                                url = f"{config.API_URL}/api/v1/ta/MatchTeamMembers/{match_id}/"
                                 cache_key = f"GET:{url}?images=false"
                                 params = {"images": "false"}
                             else:
@@ -1213,7 +1213,7 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                 # Set up cache entries for changed teams
                 for team_id in changed_team_ids:
                     try:
-                        url = f"{config.API_URL}/api/v1/ta/team"
+                        url = f"{config.API_URL}/api/v1/ta/Team"
                         cache_key = f"GET:{url}?teamId={team_id}"
                         await cache_manager.setup_refresh(
                             cache_key, url, ttl, refresh_until, params={"teamId": team_id}
