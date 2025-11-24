@@ -1176,10 +1176,10 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                 # Set up cache entries for changed teams
                 for team_id in changed_team_ids:
                     try:
-                        url = f"{config.API_URL}/api/v1/ta/Teams"
-                        cache_key = f"GET:{url}?orgId={team_id}"
+                        url = f"{config.API_URL}/api/v1/ta/Team"
+                        cache_key = f"GET:{url}?teamId={team_id}"
                         await cache_manager.setup_refresh(
-                            cache_key, url, ttl, refresh_until, params={"orgId": team_id}
+                            cache_key, url, ttl, refresh_until, params={"teamId": team_id}
                         )
                         logger.debug(f"Added cache refresh for changed team: {team_id}")
                     except Exception as e:
