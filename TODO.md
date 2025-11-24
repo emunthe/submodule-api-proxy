@@ -22,3 +22,8 @@ Currently, the code mixes these three concerns together, making it hard to follo
 -   total failures
 -   total time taken
 -   number of changes detected - with regard to saved data.
+
+### add metrics for redis-server
+
+-   current memory usage
+-   current number of keys

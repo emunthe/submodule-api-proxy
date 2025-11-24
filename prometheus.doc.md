@@ -208,14 +208,48 @@ The precache system periodically fetches season, tournament, match and team data
 ### `precache_changes_detected_total`
 
 -   **Type**: Counter
--   **Description**: Total number of changes detected by data category
+-   **Description**: Total number of changes detected by data category (cumulative)
 -   **Labels**:
-    -   `category`: Data type ("valid_seasons", "tournaments_in_season", "tournament_matches", "unique_team_ids")
+    -   `category`: Data type ("valid_seasons", "tournaments_in_season", "tournament_matches", "individual_matches", "unique_team_ids")
 -   **Use Cases**:
-    -   Monitor data freshness and change frequency
-    -   Identify which data categories change most often
-    -   Track cache warming trigger events
-    -   Analyze data update patterns
+    -   Monitor data freshness and change frequency over time
+    -   Identify which data categories change most often historically
+    -   Track cache warming trigger events cumulatively
+    -   Analyze long-term data update patterns
+
+### `precache_changes_this_run`
+
+-   **Type**: Gauge
+-   **Description**: Number of changes detected in this specific run by category (per-run snapshot)
+-   **Labels**:
+    -   `category`: Data type ("valid_seasons", "tournaments_in_season", "tournament_matches", "individual_matches", "unique_team_ids")
+    -   `run_id`: Unique 8-character identifier for this precache run
+-   **Use Cases**:
+    -   Create time-series graphs showing changes per run over time
+    -   Monitor current run activity and change volumes
+    -   Identify runs with unusually high or low change activity
+    -   Correlate change patterns with system events
+    -   Track change distribution across data categories per run
+
+### `precache_run_changes_summary`
+
+-   **Type**: Gauge
+-   **Description**: Summary of all changes detected in a specific run with run metadata for detailed analysis
+-   **Labels**:
+    -   `run_id`: Unique 8-character identifier for this precache run
+    -   `run_timestamp`: ISO timestamp when the run started (for time-series sorting)
+    -   `category`: Data type that changed
+-   **Value**: Number of changes detected for this category in this run
+-   **Special Values**:
+    -   `>= 0`: Normal run, value indicates number of changes detected
+    -   `-1`: Run failed/errored (maintains time-series continuity)
+-   **Use Cases**:
+    -   Detailed time-series analysis with precise timestamps
+    -   Create comprehensive dashboards showing change trends over time
+    -   Build alerts based on change volume thresholds per run
+    -   Correlate changes with external events using timestamps
+    -   Generate reports on data change patterns and frequencies
+    -   Track system health through change detection patterns
 
 ### `precache_api_calls_total`
 
@@ -297,6 +331,117 @@ The precache system periodically fetches season, tournament, match and team data
     -   Track overall precache health
     -   Set up alerting for low success rates
     -   Optimize retry strategies
+
+---
+
+## Time-Series Change Tracking
+
+The precache system now provides detailed per-run change tracking metrics that enable comprehensive time-series analysis of data changes. Each precache run (approximately every 3 minutes) generates a unique run ID and timestamp, allowing you to track exactly when and what changes occurred.
+
+### Change Tracking Workflow
+
+1. **Run Initialization**: Each precache run gets a unique 8-character `run_id` and ISO `run_timestamp`
+2. **Change Detection**: Changes are detected by comparing fresh API data with cached versions
+3. **Metric Recording**: Both cumulative totals and per-run snapshots are recorded
+4. **Comprehensive Coverage**: All categories are recorded (including 0 changes) for consistent time-series data
+5. **Error Handling**: Failed runs are marked with `-1` values to maintain timeline continuity
+
+### Run Identification
+
+-   **Run ID**: Short UUID (8 characters) like `a7b3c9d2` - unique identifier for each precache execution
+-   **Run Timestamp**: ISO format timestamp like `2025-11-24T10:30:15.123456+00:00` - precise start time
+-   **Run Duration**: Tracked via `precache_duration_seconds` histogram for performance monitoring
+-   **Run Status**: Success/failure tracked via `precache_runs_total{status}` counter
+
+### Data Categories Tracked
+
+1. **`valid_seasons`**: Number of seasons that meet filtering criteria (2024+, exclude bandy bedrift)
+2. **`tournaments_in_season`**: Number of tournaments that changed across all seasons
+3. **`tournament_matches`**: Number of tournaments whose match data changed
+4. **`individual_matches`**: Number of individual matches that changed (more granular than tournaments)
+5. **`unique_team_ids`**: Number of unique team identifiers that changed
+
+### Time-Series Graph Examples
+
+**Example Grafana Queries for Time-Series Visualization:**
+
+```promql
+# Changes per run over time (all categories stacked)
+precache_changes_this_run
+
+# Changes per run by specific category
+precache_changes_this_run{category="individual_matches"}
+
+# Total changes per run (sum across all categories)
+sum by (run_id, run_timestamp) (precache_run_changes_summary)
+
+# Change rate over time (changes per minute)
+rate(precache_changes_detected_total[5m])
+
+# Average changes per run over 1 hour window
+avg_over_time(sum by (run_id) (precache_changes_this_run)[1h:3m])
+
+# Detect runs with high change activity (threshold: 100+ changes)
+sum by (run_id, run_timestamp) (precache_run_changes_summary) > 100
+
+# Track failed runs over time
+precache_run_changes_summary == -1
+```
+
+**Recommended Grafana Dashboard Panels:**
+
+1. **Change Trends Over Time**:
+
+    - Query: `precache_changes_this_run`
+    - Visualization: Time series, stacked area chart
+    - Group by: `category`
+    - Shows how different data types change over time
+
+2. **Total Changes per Run**:
+
+    - Query: `sum by (run_id) (precache_changes_this_run)`
+    - Visualization: Time series, bars or lines
+    - Shows overall system change activity
+
+3. **Change Distribution by Category**:
+
+    - Query: `sum by (category) (increase(precache_changes_detected_total[24h]))`
+    - Visualization: Pie chart or bar chart
+    - Shows which data types change most frequently
+
+4. **Run Success vs Failure Timeline**:
+    - Query: `precache_runs_total`
+    - Visualization: State timeline
+    - Group by: `status`
+    - Shows precache system health over time
+
+**Time-Series Alerting Examples:**
+
+```yaml
+# Alert on unusually high changes in a single run
+- alert: HighChangesInRun
+  expr: sum by (run_id) (precache_changes_this_run) > 500
+  labels:
+      severity: warning
+  annotations:
+      summary: 'Precache run {{ $labels.run_id }} detected {{ $value }} changes'
+
+# Alert when no changes detected for extended period
+- alert: NoChangesDetected
+  expr: increase(precache_changes_detected_total[6h]) == 0
+  labels:
+      severity: info
+  annotations:
+      summary: 'No data changes detected in last 6 hours'
+
+# Alert on failed runs
+- alert: PrecacheRunFailed
+  expr: precache_run_changes_summary == -1
+  labels:
+      severity: critical
+  annotations:
+      summary: 'Precache run {{ $labels.run_id }} failed at {{ $labels.run_timestamp }}'
+```
 
 ---
 
@@ -768,10 +913,56 @@ rate(precache_runs_total{status="success"}[5m]) / rate(precache_runs_total[5m]) 
 time() - precache_last_run_timestamp
 ```
 
-**Changes Detected Over Time:**
+**Changes Detected Over Time (Cumulative):**
 
 ```promql
 increase(precache_changes_detected_total[1h])
+```
+
+**Changes Per Run (Time-Series):**
+
+```promql
+# All changes this run
+precache_changes_this_run
+
+# Changes by category this run
+precache_changes_this_run{category="individual_matches"}
+
+# Total changes per run over time
+sum by (run_id) (precache_changes_this_run)
+
+# Recent changes (last 3 hours)
+precache_changes_this_run and on() (time() - on() group_left()
+  label_replace(precache_run_changes_summary, "timestamp_seconds", "$1", "run_timestamp", "(.+)") < 10800)
+```
+
+**Run Analysis:**
+
+```promql
+# Average changes per run over time
+avg_over_time(sum by (run_id) (precache_changes_this_run)[1h:3m])
+
+# Maximum changes in any single run (last 24h)
+max_over_time(sum by (run_id) (precache_changes_this_run)[24h:3m])
+
+# Runs with zero changes (stable periods)
+sum by (run_id) (precache_changes_this_run) == 0
+
+# Most active data categories
+topk(5, sum by (category) (precache_changes_this_run))
+```
+
+**Change Rate Analysis:**
+
+```promql
+# Rate of change detection (changes per minute)
+rate(precache_changes_detected_total[5m])
+
+# Change velocity by category
+rate(precache_changes_detected_total[5m]) by (category)
+
+# Daily change volume trends
+increase(precache_changes_detected_total[24h])
 ```
 
 **Precache API Call Rate:**
@@ -844,6 +1035,16 @@ time() - on() group_left() (
 topk(5, increase(precache_changes_detected_total[24h]))
 ```
 
+**Failed Run Detection:**
+
+```promql
+# Current failed runs
+precache_run_changes_summary == -1
+
+# Failed runs in last 24 hours
+count_over_time((precache_run_changes_summary == -1)[24h:3m])
+```
+
 **Precache Performance Trends:**
 
 ````promql
@@ -911,6 +1112,75 @@ rate(precache_duration_seconds_sum[5m]) / rate(precache_duration_seconds_count[5
   annotations:
       summary: 'High precache failure rate detected'
       description: '{{ $value }}% of precache runs are failing'
+```
+
+**Precache Run Failed (Time-Series):**
+
+```yaml
+- alert: PrecacheRunFailed
+  expr: precache_run_changes_summary == -1
+  for: 0m
+  labels:
+      severity: critical
+  annotations:
+      summary: 'Precache run {{ $labels.run_id }} failed'
+      description: 'Precache run {{ $labels.run_id }} failed at {{ $labels.run_timestamp }}'
+```
+
+**High Changes in Single Run:**
+
+```yaml
+- alert: HighChangesInSingleRun
+  expr: sum by (run_id) (precache_changes_this_run) > 500
+  for: 0m
+  labels:
+      severity: warning
+  annotations:
+      summary: 'Unusually high changes detected in precache run'
+      description: 'Precache run {{ $labels.run_id }} detected {{ $value }} total changes'
+```
+
+**High Changes in Category:**
+
+```yaml
+- alert: HighCategoryChanges
+  expr: precache_changes_this_run > 200
+  for: 0m
+  labels:
+      severity: warning
+  annotations:
+      summary: 'High changes in {{ $labels.category }}'
+      description: 'Run {{ $labels.run_id }} detected {{ $value }} changes in {{ $labels.category }}'
+```
+
+**No Changes Detected (Extended Period):**
+
+```yaml
+- alert: NoChangesDetectedExtended
+  expr: increase(precache_changes_detected_total[6h]) == 0
+  for: 1h
+  labels:
+      severity: info
+  annotations:
+      summary: 'No data changes detected for extended period'
+      description: 'No changes detected in any category for over 6 hours'
+```
+
+**Change Rate Anomaly:**
+
+```yaml
+- alert: ChangeRateAnomaly
+  expr: |
+      abs(
+        rate(precache_changes_detected_total[5m]) - 
+        rate(precache_changes_detected_total[1h] offset 1h)
+      ) > 0.5
+  for: 10m
+  labels:
+      severity: info
+  annotations:
+      summary: 'Unusual change rate detected'
+      description: 'Change detection rate differs significantly from 1 hour ago'
 ```
 
 **Slow Precache Performance:**
@@ -1003,16 +1273,17 @@ rate(precache_duration_seconds_sum[5m]) / rate(precache_duration_seconds_count[5
       description: 'Precache last run timestamp was reset to 0, indicating manual data clearing'
 ```
 
-**No Data Changes Detected:**
+**Multiple Failed Runs:**
 
 ```yaml
-- alert: NoDataChangesDetected
-  expr: increase(precache_changes_detected_total[24h]) == 0
+- alert: MultiplePrecacheFailures
+  expr: count_over_time((precache_run_changes_summary == -1)[30m:3m]) > 3
+  for: 0m
   labels:
-      severity: info
+      severity: critical
   annotations:
-      summary: 'No data changes detected in 24 hours'
-      description: "Precache hasn't detected any data changes in the last 24 hours"
+      summary: 'Multiple precache runs have failed recently'
+      description: '{{ $value }} precache runs failed in the last 30 minutes'
 ```
 
 ---
@@ -1057,6 +1328,7 @@ This dual approach ensures both real-time accuracy for live monitoring and compr
 3. **Trends Dashboard**: Daily/weekly patterns, growth trends, seasonal analysis, data change patterns
 4. **Detailed Analysis**: Per-endpoint metrics, cache efficiency, optimization opportunities
 5. **Precache Monitoring**: Precache success rates, data freshness, API usage, change detection patterns
+6. **Time-Series Change Tracking**: Per-run change analysis, change trends over time, anomaly detection
 
 ### Suggested Dashboard Panels
 
@@ -1077,6 +1349,24 @@ This dual approach ensures both real-time accuracy for live monitoring and compr
 -   Cached data size by type
 -   Manual clear events and recovery status
 
+**Time-Series Change Analysis (New):**
+
+-   **Changes Over Time**: `precache_changes_this_run` stacked area chart by category
+-   **Run Success Timeline**: `precache_runs_total` with run status over time
+-   **Change Volume per Run**: `sum by (run_id) (precache_changes_this_run)` bar chart
+-   **Category Activity**: `topk(5, sum by (category) (precache_changes_this_run))` pie chart
+-   **Failed Runs**: `precache_run_changes_summary == -1` state timeline
+-   **Change Rate Trends**: `rate(precache_changes_detected_total[5m])` line chart
+-   **Run Performance**: `precache_duration_seconds` vs total changes correlation
+
+**Change Detection Insights:**
+
+-   **Daily Change Patterns**: Changes by hour of day and day of week
+-   **Change Distribution**: Percentage of runs with 0, low, medium, high changes
+-   **Anomaly Detection**: Runs with unusually high change volumes
+-   **Stability Periods**: Time ranges with consistently low changes
+-   **Category Comparison**: Which data types change most/least frequently
+
 **Performance Monitoring:**
 
 -   Request latency percentiles
@@ -1091,4 +1381,60 @@ This dual approach ensures both real-time accuracy for live monitoring and compr
 -   Weekly/daily usage patterns
 -   Top active endpoints
 
-This comprehensive metrics collection enables deep insights into API proxy performance, cache effectiveness, and usage patterns for optimal system operation and troubleshooting.
+**Real-Time Monitoring:**
+
+-   Current run status and progress
+-   Live change detection as it happens
+-   System health indicators
+-   Alert status dashboard
+
+### Grafana Dashboard JSON Examples
+
+**Time-Series Change Panel Configuration:**
+
+```json
+{
+    "title": "Changes Per Run Over Time",
+    "type": "timeseries",
+    "targets": [
+        {
+            "expr": "precache_changes_this_run",
+            "legendFormat": "{{ category }}"
+        }
+    ],
+    "fieldConfig": {
+        "defaults": {
+            "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "stepAfter",
+                "fillOpacity": 10,
+                "stacking": {
+                    "mode": "normal"
+                }
+            }
+        }
+    }
+}
+```
+
+**Run Status Panel Configuration:**
+
+```json
+{
+    "title": "Precache Run Status",
+    "type": "state-timeline",
+    "targets": [
+        {
+            "expr": "precache_runs_total",
+            "legendFormat": "{{ status }}"
+        }
+    ],
+    "options": {
+        "mergeValues": false,
+        "showValue": "auto",
+        "alignValue": "auto"
+    }
+}
+```
+
+This comprehensive metrics collection enables deep insights into API proxy performance, cache effectiveness, usage patterns, and now detailed time-series analysis of data changes for optimal system operation and troubleshooting.

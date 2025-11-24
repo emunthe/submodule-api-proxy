@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+import uuid
 from datetime import datetime
 
 import pendulum
@@ -26,6 +27,18 @@ PRECACHE_CHANGES_DETECTED = Counter(
     "precache_changes_detected_total",
     "Total number of changes detected by category",
     ["category"]  # seasons, tournaments_in_season, tournament_matches, unique_team_ids
+)
+
+PRECACHE_CHANGES_THIS_RUN = Gauge(
+    "precache_changes_this_run",
+    "Number of changes detected in this specific run by category",
+    ["category", "run_id"]  # seasons, tournaments_in_season, tournament_matches, individual_matches, unique_team_ids
+)
+
+PRECACHE_RUN_CHANGES_SUMMARY = Gauge(
+    "precache_run_changes_summary",
+    "Summary of all changes detected in a specific run with run metadata",
+    ["run_id", "run_timestamp", "category"]
 )
 
 PRECACHE_API_CALLS = Counter(
@@ -367,6 +380,8 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
         redis_client = None
         client = None
         start_time = pendulum.now()
+        run_id = str(uuid.uuid4())[:8]  # Short unique ID for this run
+        run_timestamp = start_time.isoformat()
         api_calls = {"seasons": 0, "tournaments": 0, "matches": 0}
         changes_detected = {}
         # Ensure these are defined even if related blocks are commented out
@@ -374,10 +389,26 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
         changed_team_ids = []
         changed_match_ids = set()
 
+        logger.info(f"Starting precache run {run_id} at {run_timestamp}")
+
         # Start timing for metrics
         with PRECACHE_DURATION_SECONDS.time():
             try:
                 redis_client = get_redis_client()
+
+                def _record_changes(category, count):
+                    """Helper function to record changes in both old and new metrics"""
+                    if count > 0:
+                        changes_detected[category] = count
+                        # Record in both metrics
+                        PRECACHE_CHANGES_DETECTED.labels(category=category).inc(count)
+                        PRECACHE_CHANGES_THIS_RUN.labels(category=category, run_id=run_id).set(count)
+                        PRECACHE_RUN_CHANGES_SUMMARY.labels(
+                            run_id=run_id, 
+                            run_timestamp=run_timestamp,
+                            category=category
+                        ).set(count)
+                        logger.info(f"Run {run_id}: Detected {count} changes in {category}")
 
                 async def _get_cached(key):
                     raw = await redis_client.get(key)
@@ -652,8 +683,7 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                             ensure_ascii=False,
                         ),
                     )
-                    changes_detected["valid_seasons"] = len(valid_seasons)
-                    PRECACHE_CHANGES_DETECTED.labels(category="valid_seasons").inc()
+                    _record_changes("valid_seasons", len(valid_seasons))
                     logger.info(f"Valid seasons cache updated with {len(valid_seasons)} seasons (was {len(cached_valid_seasons or [])} seasons)")
                     
                     # Verify the data was stored
@@ -938,8 +968,7 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                     new_ids = {t["tournamentId"] for t in tournaments if "tournamentId" in t}
                     changed_tournament_ids = new_ids.symmetric_difference(cached_ids)
                     
-                    changes_detected["tournaments_in_season"] = len(changed_tournament_ids)
-                    PRECACHE_CHANGES_DETECTED.labels(category="tournaments_in_season").inc()
+                    _record_changes("tournaments_in_season", len(changed_tournament_ids))
                     
                     logger.info(f"Tournament changes detected: {len(changed_tournament_ids)} tournaments changed")
                     logger.info(f"Updated tournaments_in_season cache with {len(tournaments)} tournaments")
@@ -1062,10 +1091,8 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                         if match_id not in new_matches_by_id:
                             changed_match_ids.add(match_id)
                     
-                    changes_detected["tournament_matches"] = len(changed_tournament_ids)
-                    changes_detected["individual_matches"] = len(changed_match_ids)
-                    PRECACHE_CHANGES_DETECTED.labels(category="tournament_matches").inc()
-                    PRECACHE_CHANGES_DETECTED.labels(category="individual_matches").inc()
+                    _record_changes("tournament_matches", len(changed_tournament_ids))
+                    _record_changes("individual_matches", len(changed_match_ids))
                     
                     logger.info(f"Matches changes detected: {len(changed_tournament_ids)} tournaments, {len(changed_match_ids)} individual matches")
                 else:
@@ -1095,8 +1122,7 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                         ),
                     )
                     changed_team_ids = list(team_ids.symmetric_difference(set(cached_team_ids)))
-                    changes_detected["unique_team_ids"] = len(changed_team_ids)
-                    PRECACHE_CHANGES_DETECTED.labels(category="unique_team_ids").inc()
+                    _record_changes("unique_team_ids", len(changed_team_ids))
                     logger.info(f"Team changes detected: {len(changed_team_ids)} teams")
 
                 # -----------------------------------------------------------------
@@ -1201,6 +1227,22 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                 await _update_tournaments_in_season_metrics(redis_client)
 
                 end_time = pendulum.now()
+                
+                # Ensure all categories are recorded (even with 0 changes) for consistent time-series data
+                all_categories = ["valid_seasons", "tournaments_in_season", "tournament_matches", "individual_matches", "unique_team_ids"]
+                for category in all_categories:
+                    if category not in changes_detected:
+                        PRECACHE_CHANGES_THIS_RUN.labels(category=category, run_id=run_id).set(0)
+                        PRECACHE_RUN_CHANGES_SUMMARY.labels(
+                            run_id=run_id, 
+                            run_timestamp=run_timestamp,
+                            category=category
+                        ).set(0)
+                
+                # Log summary of this run
+                total_changes = sum(changes_detected.values())
+                logger.info(f"Run {run_id} completed: {total_changes} total changes across {len(changes_detected)} categories in {(end_time - start_time).total_seconds():.2f}s")
+                
                 log_item = {
                     "action": "pre_cache_process",
                     "start_time": start_time.isoformat(),
@@ -1208,12 +1250,30 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                     "process_time_seconds": (end_time - start_time).total_seconds(),
                     "api_calls_made": api_calls,
                     "changes_detected": {k: int(v) for k, v in changes_detected.items()},
+                    "run_id": run_id,
+                    "total_changes": total_changes
                 }
                 logger.info(f"logProcess: {json.dumps(log_item, ensure_ascii=False)}")
+                
+                # Note: Prometheus metrics will be automatically cleaned up by metric expiration
+                # The PRECACHE_CHANGES_THIS_RUN and PRECACHE_RUN_CHANGES_SUMMARY metrics
+                # will persist for the configured scrape intervals to allow graphing
 
             except Exception as e:
                 # Record failed run
                 PRECACHE_RUNS_TOTAL.labels(status="error").inc()
+                
+                # Record error metrics with zero changes for this run to maintain time-series continuity
+                all_categories = ["valid_seasons", "tournaments_in_season", "tournament_matches", "individual_matches", "unique_team_ids"]
+                for category in all_categories:
+                    PRECACHE_CHANGES_THIS_RUN.labels(category=category, run_id=run_id).set(-1)  # -1 indicates error
+                    PRECACHE_RUN_CHANGES_SUMMARY.labels(
+                        run_id=run_id, 
+                        run_timestamp=run_timestamp,
+                        category=category
+                    ).set(-1)  # -1 indicates error
+                
+                logger.error(f"Run {run_id} failed: {e}")
                 logger.error(f"Error in detect_change_tournaments_and_matches: {e}")
                 logger.exception(e)
             finally:
