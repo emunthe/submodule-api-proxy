@@ -2,6 +2,8 @@
 
 This document describes all Prometheus metrics exposed by the API Proxy service. These metrics provide comprehensive monitoring and observability for cache performance, request patterns, and system health.
 
+*Last updated: November 24, 2025*
+
 ## Table of Contents
 
 1. [Core HTTP Metrics](#core-http-metrics)
@@ -141,7 +143,7 @@ These metrics include time labels for historical analysis and trend monitoring:
 ### `cache_size`
 
 -   **Type**: Gauge
--   **Description**: Current number of items in cache (unified metric for all cache size monitoring)
+-   **Description**: Current number of items in cache (real-time cache size monitoring)
 -   **Labels**: None
 -   **Update Triggers**:
     -   Real-time updates on cache operations (cache_response, clear_cache, clear_all_cache)
@@ -151,10 +153,32 @@ These metrics include time labels for historical analysis and trend monitoring:
     -   Alerting on cache size
     -   Memory management
     -   Live dashboard displays
-    -   Track cache growth patterns over time
-    -   Capacity planning and memory optimization
 
-**Note**: This metric replaces the previous separate `cache_items` and `cache_endpoints` metrics to eliminate confusion and provide a single source of truth for cache size monitoring.
+### `cache_items`
+
+-   **Type**: Gauge
+-   **Description**: Number of cached items with time labels for historical analysis
+-   **Labels**:
+    -   `hour`: Hour of day (0-23)
+    -   `day_of_week`: Day of week (0=Monday, 6=Sunday)  
+    -   `date`: Date in YYYY-MM-DD format
+-   **Use Cases**:
+    -   Historical cache growth analysis
+    -   Time-based cache size patterns
+    -   Weekly/daily cache usage trends
+
+### `cache_endpoints`
+
+-   **Type**: Gauge
+-   **Description**: Number of unique cached endpoints with time labels for endpoint diversity analysis
+-   **Labels**:
+    -   `hour`: Hour of day (0-23)
+    -   `day_of_week`: Day of week (0=Monday, 6=Sunday)  
+    -   `date`: Date in YYYY-MM-DD format
+-   **Use Cases**:
+    -   Track endpoint coverage diversity
+    -   Monitor cache distribution across endpoints
+    -   Analyze endpoint usage patterns over time
 
 ### `cache_memory_usage_bytes`
 
@@ -165,7 +189,7 @@ These metrics include time labels for historical analysis and trend monitoring:
     -   Memory monitoring
     -   Resource planning
     -   Performance optimization
--   **Note**: Currently defined but not actively updated
+-   **Note**: Metric is defined but not actively updated in current implementation
 
 ---
 
@@ -286,7 +310,7 @@ The precache system periodically fetches season, tournament, match and team data
 -   **Type**: Gauge
 -   **Description**: Size in bytes of cached precache data by data type
 -   **Labels**:
-    -   `data_type`: Type of cached data ("valid_seasons", "tournaments_in_season", "tournament_matches", "unique_team_ids")
+    -   `data_type`: Type of cached data ("valid_seasons", "tournaments_in_season", "root_tournaments", "tournament_matches", "unique_team_ids")
 -   **Use Cases**:
     -   Monitor memory usage of cached precache data
     -   Track data growth over time
@@ -488,9 +512,11 @@ The API proxy provides an endpoint for manually clearing all precache data:
 **Data Cleared**:
 
 -   `valid_seasons` - Aggregate valid seasons data
--   `tournaments_in_season` - Aggregate tournament data from all seasons
+-   `tournaments_in_season` - Aggregate tournament data from all seasons  
+-   `root_tournaments` - Root tournament data
 -   `tournament_matches` - Tournament match data
 -   `unique_team_ids` - Unique team identifiers
+-   `tournaments_season_{season_id}` - Individual season tournament cache entries (auto-discovered)
 
 **Metric Effects**:
 
@@ -504,6 +530,73 @@ The API proxy provides an endpoint for manually clearing all precache data:
 -   Clear corrupted or stale precache data
 -   Reset precache state for testing
 -   Manual intervention when automatic precache fails
+
+### Precache Process Control
+
+The API proxy provides endpoints for controlling the precache process:
+
+**Endpoint**: `POST /start_precache`
+
+**Purpose**: Start the precache periodic task
+
+**Response**:
+
+```json
+{
+    "status": "success",
+    "message": "Precache task started successfully"
+}
+```
+
+**Error Response**:
+
+```json
+{
+    "status": "error", 
+    "message": "A precache task is already running"
+}
+```
+
+**Use Cases**:
+
+-   Restart precache after manual stop
+-   Start precache on system startup
+-   Manual control of precache timing
+
+**Endpoint**: `POST /stop_precache`
+
+**Purpose**: Stop the running precache periodic task
+
+**Response**:
+
+```json
+{
+    "status": "success",
+    "message": "Precache task has been stopped"
+}
+```
+
+**Error Responses**:
+
+```json
+{
+    "status": "error",
+    "message": "No precache task is currently running"
+}
+```
+
+```json
+{
+    "status": "error",
+    "message": "Precache task is not running (already completed or cancelled)"
+}
+```
+
+**Use Cases**:
+
+-   Stop precache for maintenance
+-   Manual control of system resources
+-   Troubleshooting precache issues
 
 ---
 
@@ -550,6 +643,8 @@ Each individual season cache entry contains:
 **Parameters**:
 
 -   `season_id`: The season identifier to retrieve tournaments for
+
+**Note**: This function is available in the precache module but is not currently exposed as a REST API endpoint. It can be used internally within the application.
 
 **Response Format**:
 
@@ -641,7 +736,7 @@ topk(5, precache_cached_data_size_bytes)
     -   Real-time load monitoring
     -   Rate limiting decisions
     -   Performance alerts
--   **Note**: Currently defined but not actively updated
+-   **Note**: Metric is defined but not actively updated in current implementation
 
 ---
 
@@ -764,18 +859,18 @@ Returns a dictionary with current time labels:
 -   Increments `cache_refresh_total`
 -   Increments `cache_refresh_by_time_total` with time labels
 
-### `update_cache_size_metrics()`
+### `update_cache_size_metrics(total_items, unique_endpoints)`
 
-**Purpose**: Update cache size metric with current state
+**Purpose**: Update cache size metrics with current counts and time labels
 
-**Parameters**: None (async function)
+**Parameters**: 
+-   `total_items`: Total number of cached items
+-   `unique_endpoints`: Number of unique cached endpoints
 
 **Actions**:
-
--   Queries Redis for current cache keys count
--   Updates `cache_size` metric
-
-**Note**: This function has been simplified to work only with the unified `cache_size` metric, eliminating the previous separate tracking of cache items and endpoints.
+-   Updates `cache_size` metric with total items
+-   Updates `cache_items` metric with time labels
+-   Updates `cache_endpoints` metric with time labels
 
 ### `update_current_cache_size()`
 
@@ -802,9 +897,9 @@ Returns a dictionary with current time labels:
 
 ### Time Labels
 
--   **`hour`**: Hour of day as string ("0" to "23")
--   **`day_of_week`**: Day of week as string ("0"=Monday to "6"=Sunday)
--   **`date`**: Date in ISO format "YYYY-MM-DD"
+-   **`hour`**: Hour of day as string ("0" to "23") - UTC timezone
+-   **`day_of_week`**: Day of week as string ("0"=Monday to "6"=Sunday) - based on UTC date
+-   **`date`**: Date in ISO format "YYYY-MM-DD" - UTC date
 
 ### Request Labels
 
@@ -863,10 +958,22 @@ sum by (date) (increase(cache_requests_by_time_total[24h]))
 sum by (day_of_week) (rate(cache_requests_by_time_total[7d]))
 ```
 
-**Current Cache Size:**
+**Current Cache Size (Real-time):**
 
 ```promql
 cache_size
+```
+
+**Cache Size Trends (Historical):**
+
+```promql
+cache_items
+```
+
+**Cache Endpoint Diversity (Historical):**
+
+```promql
+cache_endpoints
 ```
 
 **Cache Growth Rate:**
@@ -1536,62 +1643,4 @@ This dual approach ensures both real-time accuracy for live monitoring and compr
 }
 ```
 
-This comprehensive metrics collection enables deep insights into API proxy performance, cache effectiveness, usage patterns, and now detailed time-series analysis of data changes for optimal system operation and troubleshooting.
-
----
-
-## Migration Guide: Cache Metrics Consolidation
-
-### What Changed
-
-Previously, there were three separate cache-related metrics that tracked similar information:
-
--   `cache_items` - Number of cached items at specific times (with time labels)
--   `cache_endpoints` - Number of unique cached endpoints at specific times (with time labels)
--   `cache_size` - Current number of items in cache (real-time)
-
-**These have been consolidated into a single `cache_size` metric** to eliminate confusion and provide a unified monitoring experience.
-
-### Migration Steps
-
-1. **Update Dashboard Queries**: Replace any usage of `cache_items` or `cache_endpoints` with `cache_size`
-
-2. **Update Alerts**: Modify alerting rules that reference the old metrics
-
-3. **Update Monitoring Scripts**: Change any external monitoring scripts to use `cache_size`
-
-### Before and After Examples
-
-**Before (Multiple Metrics):**
-
-```promql
-# Cache trend monitoring (old)
-cache_items
-
-# Cache endpoint diversity (old)
-cache_endpoints
-
-# Real-time cache size (old)
-cache_size
-```
-
-**After (Unified Metric):**
-
-```promql
-# All cache monitoring (new)
-cache_size
-
-# Cache growth rate
-rate(cache_size[5m])
-
-# Cache size alerting
-cache_size > 10000
-```
-
-### Benefits of Consolidation
-
--   **Eliminated Confusion**: Single source of truth for cache size monitoring
--   **Simplified Monitoring**: One metric covers all cache size use cases
--   **Better Performance**: Reduced metric overhead and storage requirements
--   **Clearer Documentation**: Streamlined metric descriptions and usage examples
--   **Unified Alerting**: Consistent alerting across all cache size scenarios
+This comprehensive metrics collection enables deep insights into API proxy performance, cache effectiveness, usage patterns, and detailed time-series analysis of data changes for optimal system operation and troubleshooting.
