@@ -138,34 +138,10 @@ These metrics include time labels for historical analysis and trend monitoring:
 
 ## Cache Size Metrics
 
-### `cache_items`
-
--   **Type**: Gauge
--   **Description**: Number of cached items at specific times (snapshot metric)
--   **Labels**:
-    -   `hour`: Hour of day (0-23)
-    -   `day_of_week`: Day of week (0=Monday, 6=Sunday)
-    -   `date`: Date in YYYY-MM-DD format
--   **Use Cases**:
-    -   Monitor cache growth over time
-    -   Track cache size patterns
-    -   Capacity planning
-    -   Memory usage optimization
-
-### `cache_endpoints`
-
--   **Type**: Gauge
--   **Description**: Number of unique cached endpoints at specific times
--   **Labels**: Same as `cache_items`
--   **Use Cases**:
-    -   Monitor cache diversity
-    -   Track endpoint coverage
-    -   Analyze caching patterns
-
 ### `cache_size`
 
 -   **Type**: Gauge
--   **Description**: Current number of items in cache (real-time metric with live updates)
+-   **Description**: Current number of items in cache (unified metric for all cache size monitoring)
 -   **Labels**: None
 -   **Update Triggers**:
     -   Real-time updates on cache operations (cache_response, clear_cache, clear_all_cache)
@@ -175,6 +151,10 @@ These metrics include time labels for historical analysis and trend monitoring:
     -   Alerting on cache size
     -   Memory management
     -   Live dashboard displays
+    -   Track cache growth patterns over time
+    -   Capacity planning and memory optimization
+
+**Note**: This metric replaces the previous separate `cache_items` and `cache_endpoints` metrics to eliminate confusion and provide a single source of truth for cache size monitoring.
 
 ### `cache_memory_usage_bytes`
 
@@ -766,20 +746,18 @@ Returns a dictionary with current time labels:
 -   Increments `cache_refresh_total`
 -   Increments `cache_refresh_by_time_total` with time labels
 
-### `update_cache_size_metrics(total_items, unique_endpoints)`
+### `update_cache_size_metrics()`
 
-**Purpose**: Update cache size metrics with current state and time labels
+**Purpose**: Update cache size metric with current state
 
-**Parameters**:
-
--   `total_items`: Total number of cached items
--   `unique_endpoints`: Number of unique endpoints in cache
+**Parameters**: None (async function)
 
 **Actions**:
 
--   Updates `cache_size`
--   Updates `cache_items` with time labels
--   Updates `cache_endpoints` with time labels
+-   Queries Redis for current cache keys count
+-   Updates `cache_size` metric
+
+**Note**: This function has been simplified to work only with the unified `cache_size` metric, eliminating the previous separate tracking of cache items and endpoints.
 
 ### `update_current_cache_size()`
 
@@ -862,13 +840,7 @@ sum by (date) (increase(cache_requests_by_time_total[24h]))
 sum by (day_of_week) (rate(cache_requests_by_time_total[7d]))
 ```
 
-**Cache Size Trend:**
-
-```promql
-cache_items
-```
-
-**Real-Time Current Cache Size:**
+**Current Cache Size:**
 
 ```promql
 cache_size
@@ -877,7 +849,7 @@ cache_size
 **Cache Growth Rate:**
 
 ```promql
-rate(cache_items[5m])
+rate(cache_size[5m])
 ```
 
 **Request Latency by Endpoint:**
@@ -1334,7 +1306,7 @@ This dual approach ensures both real-time accuracy for live monitoring and compr
 
 **Main Overview:**
 
--   Current cache size and hit rate
+-   Current cache size (using `cache_size` metric)
 -   Precache last run timestamp and success rate
 -   Request volume and error rates
 -   Active endpoints count
@@ -1346,8 +1318,7 @@ This dual approach ensures both real-time accuracy for live monitoring and compr
 -   Changes detected by category
 -   API calls by type
 -   Precache duration trends
--   Cached data size by type
--   Manual clear events and recovery status
+-   Cached data size monitoring
 
 **Time-Series Change Analysis (New):**
 
@@ -1438,3 +1409,61 @@ This dual approach ensures both real-time accuracy for live monitoring and compr
 ```
 
 This comprehensive metrics collection enables deep insights into API proxy performance, cache effectiveness, usage patterns, and now detailed time-series analysis of data changes for optimal system operation and troubleshooting.
+
+---
+
+## Migration Guide: Cache Metrics Consolidation
+
+### What Changed
+
+Previously, there were three separate cache-related metrics that tracked similar information:
+
+-   `cache_items` - Number of cached items at specific times (with time labels)
+-   `cache_endpoints` - Number of unique cached endpoints at specific times (with time labels)
+-   `cache_size` - Current number of items in cache (real-time)
+
+**These have been consolidated into a single `cache_size` metric** to eliminate confusion and provide a unified monitoring experience.
+
+### Migration Steps
+
+1. **Update Dashboard Queries**: Replace any usage of `cache_items` or `cache_endpoints` with `cache_size`
+
+2. **Update Alerts**: Modify alerting rules that reference the old metrics
+
+3. **Update Monitoring Scripts**: Change any external monitoring scripts to use `cache_size`
+
+### Before and After Examples
+
+**Before (Multiple Metrics):**
+
+```promql
+# Cache trend monitoring (old)
+cache_items
+
+# Cache endpoint diversity (old)
+cache_endpoints
+
+# Real-time cache size (old)
+cache_size
+```
+
+**After (Unified Metric):**
+
+```promql
+# All cache monitoring (new)
+cache_size
+
+# Cache growth rate
+rate(cache_size[5m])
+
+# Cache size alerting
+cache_size > 10000
+```
+
+### Benefits of Consolidation
+
+-   **Eliminated Confusion**: Single source of truth for cache size monitoring
+-   **Simplified Monitoring**: One metric covers all cache size use cases
+-   **Better Performance**: Reduced metric overhead and storage requirements
+-   **Clearer Documentation**: Streamlined metric descriptions and usage examples
+-   **Unified Alerting**: Consistent alerting across all cache size scenarios
