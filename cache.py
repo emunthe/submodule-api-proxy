@@ -61,7 +61,7 @@ class CacheManager:
                 await redis.close()
 
     async def cache_response(self, cache_key, response, ttl):
-        """Cache a response with the given TTL"""
+        """Cache a response with the given TTL - Production optimized"""
         if 200 <= response.status_code < 300:
             headers = dict(response.headers)
             if "content-encoding" in headers:
@@ -72,6 +72,11 @@ class CacheManager:
                 "status_code": response.status_code,
                 "headers": headers,
             }
+
+            # Log large responses for monitoring purposes but don't block caching
+            content_size = len(json.dumps(cache_data).encode('utf-8'))
+            if content_size > 10 * 1024 * 1024:  # 10MB threshold for logging
+                logger.info(f"Large response cached ({content_size/1024/1024:.1f}MB): {cache_key}")
 
             redis = get_redis_client()
             await redis.setex(cache_key, ttl, json.dumps(cache_data))
@@ -166,6 +171,127 @@ class CacheManager:
         
         # Update cache size in real-time (should be 0 after clearing all)
         await update_current_cache_size()
+
+        return {
+            "message": f"Cleared {len(keys)} cache entries and {len(refresh_keys)} refresh tasks"
+        }
+
+    async def get_production_metrics(self):
+        """Get comprehensive cache metrics for production monitoring"""
+        redis = get_redis_client()
+        
+        try:
+            # Basic key counts
+            cache_keys = await redis.keys("GET:*")
+            refresh_keys = await redis.keys("refresh:GET:*")
+            total_keys = await redis.dbsize()
+            
+            # Memory information
+            memory_info = await redis.info("memory")
+            stats_info = await redis.info("stats")
+            
+            # Calculate cache efficiency
+            hits = stats_info.get('keyspace_hits', 0)
+            misses = stats_info.get('keyspace_misses', 0)
+            hit_ratio = (hits / (hits + misses) * 100) if (hits + misses) > 0 else 0
+            
+            # Get largest keys information
+            largest_keys = []
+            try:
+                # Sample some keys to check sizes (limit to prevent performance impact)
+                sample_keys = cache_keys[:50] if len(cache_keys) > 50 else cache_keys
+                for key in sample_keys:
+                    memory_usage = await redis.memory_usage(key)
+                    if memory_usage and memory_usage > 100000:  # Only track keys > 100KB
+                        largest_keys.append({
+                            "key": key.decode('utf-8') if isinstance(key, bytes) else key,
+                            "size_mb": round(memory_usage / 1024 / 1024, 2)
+                        })
+                largest_keys.sort(key=lambda x: x['size_mb'], reverse=True)
+                largest_keys = largest_keys[:10]  # Top 10
+            except Exception as e:
+                logger.warning(f"Could not analyze key sizes: {e}")
+            
+            metrics = {
+                "cache_statistics": {
+                    "total_keys": total_keys,
+                    "cache_keys": len(cache_keys),
+                    "refresh_keys": len(refresh_keys),
+                    "other_keys": total_keys - len(cache_keys) - len(refresh_keys)
+                },
+                "memory_usage": {
+                    "used_memory_mb": round(memory_info.get('used_memory', 0) / 1024 / 1024, 2),
+                    "used_memory_rss_mb": round(memory_info.get('used_memory_rss', 0) / 1024 / 1024, 2),
+                    "used_memory_peak_mb": round(memory_info.get('used_memory_peak', 0) / 1024 / 1024, 2),
+                    "fragmentation_ratio": memory_info.get('mem_fragmentation_ratio', 0),
+                    "overhead_mb": round(memory_info.get('used_memory_overhead', 0) / 1024 / 1024, 2)
+                },
+                "performance": {
+                    "hit_ratio_percent": round(hit_ratio, 2),
+                    "total_commands": stats_info.get('total_commands_processed', 0),
+                    "ops_per_sec": stats_info.get('instantaneous_ops_per_sec', 0),
+                    "keyspace_hits": hits,
+                    "keyspace_misses": misses,
+                    "evicted_keys": stats_info.get('evicted_keys', 0),
+                    "expired_keys": stats_info.get('expired_keys', 0)
+                },
+                "largest_keys": largest_keys,
+                "timestamp": pendulum.now().isoformat()
+            }
+            
+            return metrics
+            
+        except Exception as e:
+            logger.error(f"Error getting production metrics: {e}")
+            return {"error": str(e)}
+        finally:
+            await redis.close()
+
+    async def optimize_memory_usage(self):
+        """Optimize memory usage without hard limits - production safe"""
+        redis = get_redis_client()
+        optimizations_performed = []
+        
+        try:
+            # Get memory information
+            memory_info = await redis.info("memory")
+            fragmentation_ratio = memory_info.get('mem_fragmentation_ratio', 1.0)
+            
+            # Optimize fragmentation if it's high
+            if fragmentation_ratio > 1.5:
+                try:
+                    await redis.memory_purge()
+                    optimizations_performed.append(f"Memory defragmentation initiated (was {fragmentation_ratio:.2f})")
+                except Exception as e:
+                    logger.warning(f"Could not perform memory purge: {e}")
+            
+            # Remove expired keys proactively
+            expired_count = 0
+            cache_keys = await redis.keys("GET:*")
+            
+            # Check TTL for a sample of keys and remove those close to expiring with no activity
+            sample_size = min(100, len(cache_keys))  # Limit to prevent performance impact
+            for key in cache_keys[:sample_size]:
+                ttl = await redis.ttl(key)
+                if ttl > 0 and ttl < 60:  # Keys expiring in less than 1 minute
+                    # Could implement additional logic here to check if key is being accessed
+                    pass  # For now, let Redis handle natural expiration
+            
+            # Log optimization results
+            if optimizations_performed:
+                logger.info("Memory optimizations performed: " + "; ".join(optimizations_performed))
+            
+            return {
+                "optimizations": optimizations_performed,
+                "fragmentation_ratio": fragmentation_ratio,
+                "total_keys_checked": sample_size
+            }
+            
+        except Exception as e:
+            logger.error(f"Error during memory optimization: {e}")
+            return {"error": str(e)}
+        finally:
+            await redis.close()
 
         return {
             "message": f"Cleared {len(keys)} cache entries and {len(refresh_keys)} refresh tasks"

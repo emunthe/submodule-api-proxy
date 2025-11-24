@@ -153,6 +153,18 @@ async def list_cache():
     return await cache_manager.list_cache()
 
 
+@app.get("/cache/production-metrics", summary="Get production cache metrics", tags=["Cache", "Monitoring"])
+async def get_production_metrics():
+    """Get comprehensive cache metrics for production monitoring"""
+    return await cache_manager.get_production_metrics()
+
+
+@app.post("/cache/optimize", summary="Optimize cache memory usage", tags=["Cache", "Monitoring"])
+async def optimize_cache():
+    """Optimize cache memory usage without hard limits"""
+    return await cache_manager.optimize_memory_usage()
+
+
 @app.delete(
     "/cache/{path:path}", summary="Clear cache for a specific endpoint", tags=["Cache"]
 )
