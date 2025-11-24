@@ -1437,7 +1437,6 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                     "end_time": end_time.isoformat(),
                     "process_time_seconds": (end_time - start_time).total_seconds(),
                     "api_calls_made": api_calls,
-                    "api_urls_called": api_urls_called,
                     "changes_detected": {k: int(v) for k, v in changes_detected.items()},
                     "run_id": run_id,
                     "total_changes": total_changes,
