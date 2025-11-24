@@ -1150,54 +1150,54 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                 # Fetch tournament matches for root tournaments - COMMENTED OUT
                 # get data with calls to /api/v1/ta/TournamentMatches?tournamentId={tournamentId} based on root_tournaments only
                 matches = []
-                # for tournament in root_tournaments:
-                #     tournament_id = tournament.get("tournamentId")
-                #     if not tournament_id:
-                #         continue
-                #     try:
-                #         url = f"{config.API_URL}/api/v1/ta/TournamentMatches"
-                #         params = {"tournamentId": tournament_id}
-                #         
-                #         # Track the API call
-                #         _track_api_call(url, "GET", params)
-                #         
-                #         resp = await client.get(url, headers=headers, params=params)
-                #         PRECACHE_API_CALLS.labels(call_type="matches").inc()
-                #         
-                #         # store raw response for detecting changes
-                #         if resp.status_code < 400:
-                #             try:
-                #                 raw_response = resp.json()
-                #                 tournament_matches = raw_response.get("matches", [])
-                #                 
-                #                 # Check if matches data is null or empty for this tournament
-                #                 if not tournament_matches or (isinstance(tournament_matches, list) and len(tournament_matches) == 0):
-                #                     logger.debug(f"No matches found for tournament {tournament_id} (this may be normal)")
-                #                     # Don't mark as DOWN for empty matches as tournaments may legitimately have no matches
-                #                 else:
-                #                     # Data received successfully
-                #                     _update_upstream_status("UP")
-                #                 
-                #                 for match in tournament_matches:
-                #                     # Validate match structure
-                #                     if not isinstance(match, dict) or not match.get("matchId"):
-                #                         logger.debug(f"Skipping invalid match data: {match}")
-                #                         continue
-                #                     
-                #                     match["apiPath"] = url
-                #                     match["tournamentId"] = tournament_id
-                #                     matches.append(match)
-                #                 
-                #                 logger.debug(f"Fetched {len(tournament_matches)} matches for tournament {tournament_id}")
-                #             except Exception as e:
-                #                 logger.warning(f"Failed to parse matches response for tournament {tournament_id}: {e}")
-                #                 _update_upstream_status("DOWN")
-                #         else:
-                #             logger.warning(f"Matches API request failed for tournament {tournament_id}: {resp.status_code}")
-                #             _update_upstream_status("DOWN")
-                #     except Exception as e:
-                #         logger.error(f"Error fetching matches for tournament {tournament_id}: {e}")
-                #         _update_upstream_status("DOWN") 
+                for tournament in root_tournaments:
+                    tournament_id = tournament.get("tournamentId")
+                    if not tournament_id:
+                        continue
+                    try:
+                        url = f"{config.API_URL}/api/v1/ta/TournamentMatches"
+                        params = {"tournamentId": tournament_id}
+                        
+                        # Track the API call
+                        _track_api_call(url, "GET", params)
+                        
+                        resp = await client.get(url, headers=headers, params=params)
+                        PRECACHE_API_CALLS.labels(call_type="matches").inc()
+                        
+                        # store raw response for detecting changes
+                        if resp.status_code < 400:
+                            try:
+                                raw_response = resp.json()
+                                tournament_matches = raw_response.get("matches", [])
+                                
+                                # Check if matches data is null or empty for this tournament
+                                if not tournament_matches or (isinstance(tournament_matches, list) and len(tournament_matches) == 0):
+                                    logger.debug(f"No matches found for tournament {tournament_id} (this may be normal)")
+                                    # Don't mark as DOWN for empty matches as tournaments may legitimately have no matches
+                                else:
+                                    # Data received successfully
+                                    _update_upstream_status("UP")
+                                
+                                for match in tournament_matches:
+                                    # Validate match structure
+                                    if not isinstance(match, dict) or not match.get("matchId"):
+                                        logger.debug(f"Skipping invalid match data: {match}")
+                                        continue
+                                    
+                                    match["apiPath"] = url
+                                    match["tournamentId"] = tournament_id
+                                    matches.append(match)
+                                
+                                logger.debug(f"Fetched {len(tournament_matches)} matches for tournament {tournament_id}")
+                            except Exception as e:
+                                logger.warning(f"Failed to parse matches response for tournament {tournament_id}: {e}")
+                                _update_upstream_status("DOWN")
+                        else:
+                            logger.warning(f"Matches API request failed for tournament {tournament_id}: {resp.status_code}")
+                            _update_upstream_status("DOWN")
+                    except Exception as e:
+                        logger.error(f"Error fetching matches for tournament {tournament_id}: {e}")
+                        _update_upstream_status("DOWN") 
                 
 
 
