@@ -805,23 +805,77 @@ topk(5, precache_cached_data_size_bytes)
     -   Verify precache data completeness
     -   Set up alerts for missing tournament data
 
-### `precache_tournaments_in_season_info`
+### `precache_tournaments_by_season`
 
 -   **Type**: Gauge
--   **Description**: Information about tournaments in season with tournament details as labels
+-   **Description**: Number of tournaments per season (aggregated metric to reduce cardinality)
+-   **Labels**:
+    -   `season_id`: Associated season identifier
+    -   `sport_id`: Sport identifier (72=bandy, 151=innebandy, etc.)
+    -   `sport_name`: Human-readable sport name
+-   **Value**: Count of tournaments in this season-sport combination
+-   **Use Cases**:
+    -   Monitor tournament distribution across seasons
+    -   Track tournament volume by season and sport
+    -   Detect seasons with unusual tournament counts
+    -   Low cardinality alternative to per-tournament metrics
+-   **Cardinality**: ~2-5 series (one per season-sport combination)
+
+### `precache_tournaments_by_type`
+
+-   **Type**: Gauge
+-   **Description**: Number of tournaments by root/child type per sport (aggregated metric)
+-   **Labels**:
+    -   `sport_id`: Sport identifier
+    -   `sport_name`: Human-readable sport name
+    -   `is_root`: "true" for root tournaments, "false" for child tournaments
+-   **Value**: Count of tournaments of this type
+-   **Use Cases**:
+    -   Monitor root vs child tournament distribution
+    -   Track tournament hierarchy patterns by sport
+    -   Detect changes in tournament structure
+    -   Analyze tournament organization patterns
+-   **Cardinality**: ~4-8 series (sport × root/child combinations)
+
+### `precache_tournament_matches_count`
+
+-   **Type**: Gauge
+-   **Description**: Total number of tournament matches currently cached
+-   **Use Cases**:
+    -   Monitor match data volume
+    -   Track match data changes over time
+    -   Verify precache match data completeness
+    -   Set up alerts for missing match data
+
+### `precache_tournament_matches_by_tournament`
+
+-   **Type**: Gauge
+-   **Description**: Number of matches per tournament (aggregated metric to reduce cardinality)
 -   **Labels**:
     -   `tournament_id`: Unique tournament identifier
     -   `tournament_name`: Tournament name (truncated to 50 characters)
     -   `season_id`: Associated season identifier
-    -   `sport_id`: Sport identifier
-    -   `is_root`: "true" for root tournaments, "false" for child tournaments
--   **Value**: Always 1 (indicates tournament exists)
+-   **Value**: Count of matches in this tournament
 -   **Use Cases**:
-    -   Detailed tournament monitoring with rich metadata
-    -   Track root vs child tournament distribution
-    -   Season-tournament relationship analysis
-    -   Sport-specific tournament tracking
-    -   Create tournament hierarchy dashboards
+    -   Monitor match distribution across tournaments
+    -   Identify tournaments with unusual match counts
+    -   Track match volume changes per tournament
+    -   Detect missing or incomplete match data
+-   **Cardinality**: ~433 series (one per tournament with matches)
+
+### `precache_tournament_matches_by_season`
+
+-   **Type**: Gauge
+-   **Description**: Number of matches per season (aggregated metric)
+-   **Labels**:
+    -   `season_id`: Season identifier
+-   **Value**: Total count of matches in this season
+-   **Use Cases**:
+    -   Monitor match distribution across seasons
+    -   Track seasonal match volume trends
+    -   Compare match activity between seasons
+    -   Detect seasons with missing or incomplete data
+-   **Cardinality**: ~2-5 series (one per season)
 
 **Example Queries:**
 
@@ -829,18 +883,34 @@ topk(5, precache_cached_data_size_bytes)
 # Total valid seasons by sport
 sum by (sport_name) (precache_valid_seasons_info)
 
-# Total tournaments by sport
-sum by (sport_id) (precache_tournaments_in_season_info)
+# Total tournaments by sport (aggregated)
+sum by (sport_name) (precache_tournaments_by_type)
 
-# Root tournaments only
-sum(precache_tournaments_in_season_info{is_root="true"})
+# Root tournaments only (aggregated)
+sum(precache_tournaments_by_type{is_root="true"})
 
-# Tournaments per season
-sum by (season_id) (precache_tournaments_in_season_info)
+# Tournaments per season (aggregated)
+precache_tournaments_by_season
+
+# Matches per season
+precache_tournament_matches_by_season
+
+# Average matches per tournament
+avg(precache_tournament_matches_by_tournament)
+
+# Tournaments with most matches
+topk(10, precache_tournament_matches_by_tournament)
 
 # Monitor data completeness
-precache_valid_seasons_count > 0 and precache_tournaments_in_season_count > 0
+precache_valid_seasons_count > 0 and precache_tournaments_in_season_count > 0 and precache_tournament_matches_count > 0
 ```
+
+**Cardinality Optimization Notes:**
+
+The tournament and match metrics use aggregation to reduce cardinality:
+- **Old approach**: 433 tournament series + 6,463 match series = 6,896 total series
+- **New approach**: 2 season series + 4 type series + 433 tournament series + 2 season series = 441 total series
+- **Reduction**: 94% fewer metric series while maintaining useful monitoring capabilities
 
 ---
 

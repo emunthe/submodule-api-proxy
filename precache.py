@@ -94,10 +94,33 @@ PRECACHE_TOURNAMENTS_IN_SEASON_COUNT = Gauge(
     "Total number of tournaments in season currently cached"
 )
 
-PRECACHE_TOURNAMENTS_IN_SEASON_INFO = Gauge(
-    "precache_tournaments_in_season_info",
-    "Information about tournaments in season with tournament details as labels",
-    ["tournament_id", "tournament_name", "season_id", "sport_id", "is_root"]
+PRECACHE_TOURNAMENTS_BY_SEASON = Gauge(
+    "precache_tournaments_by_season",
+    "Number of tournaments per season",
+    ["season_id", "sport_id", "sport_name"]
+)
+
+PRECACHE_TOURNAMENTS_BY_TYPE = Gauge(
+    "precache_tournaments_by_type",
+    "Number of tournaments by root/child type per sport",
+    ["sport_id", "sport_name", "is_root"]
+)
+
+PRECACHE_TOURNAMENT_MATCHES_COUNT = Gauge(
+    "precache_tournament_matches_count",
+    "Total number of tournament matches currently cached"
+)
+
+PRECACHE_TOURNAMENT_MATCHES_BY_TOURNAMENT = Gauge(
+    "precache_tournament_matches_by_tournament",
+    "Number of matches per tournament",
+    ["tournament_id", "tournament_name", "season_id"]
+)
+
+PRECACHE_TOURNAMENT_MATCHES_BY_SEASON = Gauge(
+    "precache_tournament_matches_by_season",
+    "Number of matches per season",
+    ["season_id"]
 )
 
 PRECACHE_API_URLS_CALLED = Gauge(
@@ -214,7 +237,8 @@ async def _update_tournaments_in_season_metrics(redis_client):
     """Update metrics for tournaments in season content and count"""
     try:
         # Clear existing metrics first
-        PRECACHE_TOURNAMENTS_IN_SEASON_INFO.clear()
+        PRECACHE_TOURNAMENTS_BY_SEASON.clear()
+        PRECACHE_TOURNAMENTS_BY_TYPE.clear()
         
         # Get tournaments in season data from Redis
         raw_data = await redis_client.get("tournaments_in_season")
@@ -234,28 +258,48 @@ async def _update_tournaments_in_season_metrics(redis_client):
                     73: "rinkbandy"
                 }
                 
-                # Update info metric with labels for each tournament
+                # Aggregate tournaments by season and by type
+                tournaments_by_season = {}
+                tournaments_by_type = {}
+                
                 for tournament in tournaments:
                     if not isinstance(tournament, dict):
                         continue
-                        
-                    tournament_id = str(tournament.get("tournamentId", "unknown"))
-                    tournament_name = tournament.get("tournamentName", "unknown")[:50]  # Limit length for labels
+                    
                     season_id = str(tournament.get("seasonId", "unknown"))
                     sport_id = tournament.get("sportId", 0)
                     sport_name = sport_names.get(sport_id, f"sport_{sport_id}")
                     is_root = "true" if not tournament.get("parentTournamentId") else "false"
                     
-                    # Set metric with tournament information as labels
-                    PRECACHE_TOURNAMENTS_IN_SEASON_INFO.labels(
-                        tournament_id=tournament_id,
-                        tournament_name=tournament_name,
-                        season_id=season_id,
-                        sport_id=str(sport_id),
-                        is_root=is_root
-                    ).set(1)  # Value of 1 indicates this tournament exists
+                    # Count by season
+                    season_key = (season_id, str(sport_id), sport_name)
+                    if season_key not in tournaments_by_season:
+                        tournaments_by_season[season_key] = 0
+                    tournaments_by_season[season_key] += 1
                     
-                logger.debug(f"Updated tournaments in season metrics: {len(tournaments)} tournaments")
+                    # Count by type
+                    type_key = (str(sport_id), sport_name, is_root)
+                    if type_key not in tournaments_by_type:
+                        tournaments_by_type[type_key] = 0
+                    tournaments_by_type[type_key] += 1
+                
+                # Update season metrics
+                for (season_id, sport_id, sport_name), count in tournaments_by_season.items():
+                    PRECACHE_TOURNAMENTS_BY_SEASON.labels(
+                        season_id=season_id,
+                        sport_id=sport_id,
+                        sport_name=sport_name
+                    ).set(count)
+                
+                # Update type metrics
+                for (sport_id, sport_name, is_root), count in tournaments_by_type.items():
+                    PRECACHE_TOURNAMENTS_BY_TYPE.labels(
+                        sport_id=sport_id,
+                        sport_name=sport_name,
+                        is_root=is_root
+                    ).set(count)
+                    
+                logger.debug(f"Updated tournaments in season metrics: {len(tournaments)} tournaments across {len(tournaments_by_season)} season-sport combinations")
                 
             except json.JSONDecodeError as e:
                 logger.error(f"Failed to parse tournaments_in_season data: {e}")
@@ -266,6 +310,75 @@ async def _update_tournaments_in_season_metrics(redis_client):
             
     except Exception as e:
         logger.error(f"Error updating tournaments in season metrics: {e}")
+
+
+async def _update_tournament_matches_metrics(redis_client):
+    """Update metrics for tournament matches content and count"""
+    try:
+        # Clear existing metrics first
+        PRECACHE_TOURNAMENT_MATCHES_BY_TOURNAMENT.clear()
+        PRECACHE_TOURNAMENT_MATCHES_BY_SEASON.clear()
+        
+        # Get tournament matches data from Redis
+        raw_data = await redis_client.get("tournament_matches")
+        if raw_data:
+            try:
+                data = json.loads(raw_data)
+                matches = data.get("data", [])
+                
+                # Update count metric
+                PRECACHE_TOURNAMENT_MATCHES_COUNT.set(len(matches))
+                
+                # Aggregate matches by tournament and season
+                matches_by_tournament = {}
+                matches_by_season = {}
+                
+                for match in matches:
+                    if not isinstance(match, dict):
+                        continue
+                    
+                    tournament_id = str(match.get("tournamentId", "unknown"))
+                    season_id = str(match.get("seasonId", "unknown"))
+                    
+                    # Count by tournament
+                    if tournament_id not in matches_by_tournament:
+                        matches_by_tournament[tournament_id] = {
+                            "count": 0,
+                            "tournament_name": match.get("tournamentName", "unknown")[:50],
+                            "season_id": season_id
+                        }
+                    matches_by_tournament[tournament_id]["count"] += 1
+                    
+                    # Count by season
+                    if season_id not in matches_by_season:
+                        matches_by_season[season_id] = 0
+                    matches_by_season[season_id] += 1
+                
+                # Update tournament metrics
+                for tournament_id, info in matches_by_tournament.items():
+                    PRECACHE_TOURNAMENT_MATCHES_BY_TOURNAMENT.labels(
+                        tournament_id=tournament_id,
+                        tournament_name=info["tournament_name"],
+                        season_id=info["season_id"]
+                    ).set(info["count"])
+                
+                # Update season metrics
+                for season_id, count in matches_by_season.items():
+                    PRECACHE_TOURNAMENT_MATCHES_BY_SEASON.labels(
+                        season_id=season_id
+                    ).set(count)
+                    
+                logger.debug(f"Updated tournament matches metrics: {len(matches)} matches across {len(matches_by_tournament)} tournaments and {len(matches_by_season)} seasons")
+                
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse tournament_matches data: {e}")
+                PRECACHE_TOURNAMENT_MATCHES_COUNT.set(0)
+        else:
+            # No data available
+            PRECACHE_TOURNAMENT_MATCHES_COUNT.set(0)
+            
+    except Exception as e:
+        logger.error(f"Error updating tournament matches metrics: {e}")
 
 
 async def clear_precache_data():
@@ -300,6 +413,7 @@ async def clear_precache_data():
         await _update_cached_data_size_metrics(redis_client)
         await _update_valid_seasons_metrics(redis_client)
         await _update_tournaments_in_season_metrics(redis_client)
+        await _update_tournament_matches_metrics(redis_client)
         
         # Reset last run timestamp
         PRECACHE_LAST_RUN_TIMESTAMP.set(0)
@@ -656,9 +770,9 @@ async def pre_cache_getter(token_manager, run_id=None):
                         raw = resp.json()
                         
                         # Debug: Log the actual response structure
-                        if raw:
-                            logger.debug(f"Run {run_id}: Tournament {tournament_id} API response keys: {list(raw.keys())}")
-                            logger.debug(f"Run {run_id}: Tournament {tournament_id} full response: {json.dumps(raw, indent=2)[:500]}")
+                        # if raw:
+                        #     logger.debug(f"Run {run_id}: Tournament {tournament_id} API response keys: {list(raw.keys())}")
+                        #     logger.debug(f"Run {run_id}: Tournament {tournament_id} full response: {json.dumps(raw, indent=2)[:500]}")
                         
                         data = raw.get("matches", [])  # Corrected: API returns "matches", not "tournamentMatches"
                         
@@ -849,6 +963,7 @@ async def compare_and_update_cache(fresh_data_result, cache_manager, run_id, sta
         await _update_cached_data_size_metrics(redis_client)
         await _update_valid_seasons_metrics(redis_client)
         await _update_tournaments_in_season_metrics(redis_client)
+        await _update_tournament_matches_metrics(redis_client)
         
         # -----------------------------------------------------------------
         # Compare and update valid_seasons
@@ -924,10 +1039,12 @@ async def compare_and_update_cache(fresh_data_result, cache_manager, run_id, sta
             logger.info(f"Tournament changes detected: {len(changed_tournament_ids)} tournaments changed")
             logger.info(f"Updated tournaments_in_season cache with {len(tournaments)} tournaments")
             await _update_tournaments_in_season_metrics(redis_client)
+            await _update_tournament_matches_metrics(redis_client)
         else:
             changed_tournament_ids = set()
             logger.debug(f"No tournament changes detected - cache has {len(cached_tournaments or [])} tournaments, fetched {len(tournaments)}")
             await _update_tournaments_in_season_metrics(redis_client)
+            await _update_tournament_matches_metrics(redis_client)
         
         # -----------------------------------------------------------------
         # Compare and update matches
@@ -1005,6 +1122,7 @@ async def compare_and_update_cache(fresh_data_result, cache_manager, run_id, sta
         await _update_cached_data_size_metrics(redis_client)
         await _update_valid_seasons_metrics(redis_client)
         await _update_tournaments_in_season_metrics(redis_client)
+        await _update_tournament_matches_metrics(redis_client)
         
         # Ensure all categories are recorded (even with 0 changes) for consistent time-series data
         all_categories = ["valid_seasons", "tournaments_in_season", "tournament_matches", "individual_matches", "unique_team_ids"]
