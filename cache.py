@@ -7,7 +7,7 @@ import json
 import pendulum
 
 from .config import config
-from .prometheus import CACHE_REFRESH, record_cache_refresh, update_cache_size_metrics, CACHE_SIZE, update_current_cache_size
+from .prometheus import record_cache_refresh, update_cache_size_metrics, CACHE_SIZE, update_current_cache_size
 from .util import (
     extract_base_endpoint,
     get_http_client,
