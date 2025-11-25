@@ -1185,6 +1185,11 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
             upstream_status = "UP"
 
             logger.info(f"Starting precache run {run_id} at {run_timestamp} (iteration {loop_iteration})")
+            
+            # Clear previous run metrics to ensure fresh data for this run
+            PRECACHE_CHANGES_THIS_RUN.clear()
+            PRECACHE_RUN_CHANGES_SUMMARY.clear()
+            
         except Exception as loop_init_error:
             logger.error(f"Critical error in precache loop initialization: {loop_init_error}")
             logger.exception(loop_init_error)
