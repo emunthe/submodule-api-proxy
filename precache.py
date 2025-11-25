@@ -654,7 +654,13 @@ async def pre_cache_getter(token_manager, run_id=None):
                             return []
                         
                         raw = resp.json()
-                        data = raw.get("tournamentMatches", [])  # Fixed key name for matches
+                        
+                        # Debug: Log the actual response structure
+                        if raw:
+                            logger.debug(f"Run {run_id}: Tournament {tournament_id} API response keys: {list(raw.keys())}")
+                            logger.debug(f"Run {run_id}: Tournament {tournament_id} full response: {json.dumps(raw, indent=2)[:500]}")
+                        
+                        data = raw.get("matches", [])  # Corrected: API returns "matches", not "tournamentMatches"
                         
                         if isinstance(data, dict):
                             return [data]
@@ -779,7 +785,7 @@ async def compare_and_update_cache(fresh_data_result, cache_manager, run_id, sta
         
         valid_seasons = fresh_data["valid_seasons"]
         tournaments = fresh_data["tournaments_in_season"]
-        matches = fresh_data["tournament_matches"]
+        tournament_matches = fresh_data["tournament_matches"]
         team_ids_list = fresh_data["unique_team_ids"]
         
         root_tournaments = [t for t in tournaments if not t.get("parentTournamentId")]
@@ -813,22 +819,22 @@ async def compare_and_update_cache(fresh_data_result, cache_manager, run_id, sta
         # Load cached data
         cached_valid_seasons = await _get_cached("valid_seasons")
         cached_tournaments = await _get_cached("tournaments_in_season")
-        cached_matches = await _get_cached("tournament_matches")
+        cached_tournament_matches = await _get_cached("tournament_matches")
         cached_team_ids = await _get_cached("unique_team_ids") or []
         
         # Log cached data to debug files
         _log_cache_data_to_file("valid_seasons", cached_valid_seasons, run_id)
         _log_cache_data_to_file("tournaments_in_season", cached_tournaments, run_id)
-        _log_cache_data_to_file("tournament_matches", cached_matches, run_id)
+        _log_cache_data_to_file("tournament_matches", cached_tournament_matches, run_id)
         _log_cache_data_to_file("unique_team_ids", cached_team_ids, run_id)
         
-        logger.info(f"Run {run_id}: Loaded cached data - {len(cached_valid_seasons or [])} seasons, {len(cached_tournaments or [])} tournaments, {len(cached_matches or [])} matches, {len(cached_team_ids)} team IDs")
+        logger.info(f"Run {run_id}: Loaded cached data - {len(cached_valid_seasons or [])} seasons, {len(cached_tournaments or [])} tournaments, {len(cached_tournament_matches or [])} matches, {len(cached_team_ids)} team IDs")
         
         # Log newly fetched data to debug files
         _log_cache_data_to_file("valid_seasons_fetched", valid_seasons, run_id)
         _log_cache_data_to_file("tournaments_in_season_fetched", tournaments, run_id)
         _log_cache_data_to_file("root_tournaments_fetched", root_tournaments, run_id)
-        _log_cache_data_to_file("tournament_matches_fetched", matches, run_id)
+        _log_cache_data_to_file("tournament_matches_fetched", tournament_matches, run_id)
         _log_cache_data_to_file("unique_team_ids_fetched", team_ids_list, run_id)
         
         # Update metrics for items processed
@@ -836,7 +842,7 @@ async def compare_and_update_cache(fresh_data_result, cache_manager, run_id, sta
         PRECACHE_ITEMS_PROCESSED.labels(item_type="valid_seasons").set(len(valid_seasons))
         PRECACHE_ITEMS_PROCESSED.labels(item_type="tournaments").set(len(tournaments))
         PRECACHE_ITEMS_PROCESSED.labels(item_type="root_tournaments").set(len(root_tournaments))
-        PRECACHE_ITEMS_PROCESSED.labels(item_type="matches").set(len(matches))
+        PRECACHE_ITEMS_PROCESSED.labels(item_type="tournament_matches").set(len(tournament_matches))
         PRECACHE_ITEMS_PROCESSED.labels(item_type="teams").set(len(team_ids_list))
         
         # Update cached data size metrics
@@ -925,23 +931,23 @@ async def compare_and_update_cache(fresh_data_result, cache_manager, run_id, sta
         
         # -----------------------------------------------------------------
         # Compare and update matches
-        matches_changed = json.dumps(matches, sort_keys=True) != json.dumps(cached_matches or [], sort_keys=True)
+        matches_changed = json.dumps(tournament_matches, sort_keys=True) != json.dumps(cached_tournament_matches or [], sort_keys=True)
         
-        logger.info(f"Run {run_id}: Data comparison - fetched {len(matches)} matches, cached {len(cached_matches or [])} matches")
+        logger.info(f"Run {run_id}: Data comparison - fetched {len(tournament_matches)} matches, cached {len(cached_tournament_matches or [])} matches")
         logger.info(f"Run {run_id}: Matches changed: {matches_changed}")
         
         if matches_changed:
             await redis_client.set(
                 "tournament_matches",
                 json.dumps(
-                    {"data": matches, "last_updated": start_time.isoformat()},
+                    {"data": tournament_matches, "last_updated": start_time.isoformat()},
                     ensure_ascii=False,
                 ),
             )
             
             # Detect changed tournaments (by comparing match lists per tournament)
-            new_group = _group_by_tournament(matches)
-            old_group = _group_by_tournament(cached_matches or [])
+            new_group = _group_by_tournament(tournament_matches)
+            old_group = _group_by_tournament(cached_tournament_matches or [])
             
             for tid, new_list in new_group.items():
                 old_list = old_group.get(tid, [])
@@ -953,8 +959,8 @@ async def compare_and_update_cache(fresh_data_result, cache_manager, run_id, sta
                     changed_tournament_ids.add(tid)
             
             # Detect changed individual matches
-            new_matches_by_id = _group_by_match_id(matches)
-            old_matches_by_id = _group_by_match_id(cached_matches or [])
+            new_matches_by_id = _group_by_match_id(tournament_matches)
+            old_matches_by_id = _group_by_match_id(cached_tournament_matches or [])
             
             for match_id, new_match in new_matches_by_id.items():
                 old_match = old_matches_by_id.get(match_id, {})
@@ -975,7 +981,7 @@ async def compare_and_update_cache(fresh_data_result, cache_manager, run_id, sta
         # -----------------------------------------------------------------
         # Compare and update team IDs
         team_ids = set()
-        for match in matches:
+        for match in tournament_matches:
             for key in ("hometeamId", "awayteamId"):
                 tid = match.get(key)
                 if tid is not None:
@@ -1105,62 +1111,63 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                     if upstream_status == "DOWN":
                         logger.error(f"Run {run_id}: Upstream status is DOWN, aborting cache update")
                         raise Exception("Upstream status is DOWN, aborting cache update")
+
+                    # Step 3: Warm caches for changed items
+                    logger.info(f"Run {run_id}: Step 3 - Warming caches for changed items")
                     
-                except Exception as e:
-                    logger.error(f"Run {run_id}: Failed to compare and update cache: {e}")
-                    raise
-                
-                # Step 3: Warm caches for changed items
-                logger.info(f"Run {run_id}: Step 3 - Warming caches for changed items")
-                
-                try:
+                    # Define cache warming parameters
                     refresh_until = pendulum.now().add(days=7)
                     ttl = 7 * 24 * 60 * 60
+
+                    if changed_tournament_ids:
+                        logger.info(f"Run {run_id}: Detected changes in {len(changed_tournament_ids)} tournaments")
+
+                    if changed_team_ids:
+                        logger.info(f"Run {run_id}: Detected changes in {len(changed_team_ids)} teams")
+
+                        # Set up cache entries for changed teams
+                        # for team_id in changed_team_ids:
+                        #     try:
+                        #         url = f"{config.API_URL}/api/v1/ta/Team"
+                        #         cache_key = f"GET:{url}?teamId={team_id}"
+                        #         await cache_manager.setup_refresh(
+                        #             cache_key, url, ttl, refresh_until, params={"teamId": team_id}
+                        #         )
+                        #         logger.debug(f"Added cache refresh for changed team: {team_id}")
+                        #     except Exception as e:
+                        #         logger.error(f"Error setting up cache for team {team_id}: {e}")
+
+                    if changed_match_ids:
+                        logger.info(f"Run {run_id}: Detected changes in {len(changed_match_ids)} matches")
+                        
+                        # Set up cache entries for match-related endpoints
+                        # match_endpoint_templates = [
+                        #     f"{config.API_URL}/api/v1/ta/match/",
+                        #     f"{config.API_URL}/api/v1/ta/matchincidents/",
+                        #     f"{config.API_URL}/api/v1/ta/matchreferee",
+                        #     f"{config.API_URL}/api/v1/ta/matchteammembers/"
+                        # ]
+                        # 
+                        # for match_id in changed_match_ids:
+                        #     for base_url in match_endpoint_templates:
+                        #         try:
+                        #             if "matchteammembers" in base_url:
+                        #                 url = f"{config.API_URL}/api/v1/ta/MatchTeamMembers/{match_id}/"
+                        #                 cache_key = f"GET:{url}?images=false"
+                        #                 params = {"images": "false"}
+                        #             else:
+                        #                 url = base_url
+                        #                 cache_key = f"GET:{url}?matchId={match_id}"
+                        #                 params = {"matchId": match_id}
+                        #             
+                        #             await cache_manager.setup_refresh(
+                        #                 cache_key, url, ttl, refresh_until, params=params
+                        #             )
+                        #             logger.debug(f"Added cache refresh for changed match {match_id}: {cache_key}")
+                        #         except Exception as e:
+                        #             logger.error(f"Error setting up cache for match {match_id} endpoint {base_url}: {e}")
                     
-                    # Set up cache entries for match-related endpoints
-                    match_endpoint_templates = [
-                        f"{config.API_URL}/api/v1/ta/match/",
-                        f"{config.API_URL}/api/v1/ta/matchincidents/",
-                        f"{config.API_URL}/api/v1/ta/matchreferee",
-                        f"{config.API_URL}/api/v1/ta/matchteammembers/"
-                    ]
-                    
-                    for match_id in changed_match_ids:
-                        for base_url in match_endpoint_templates:
-                            try:
-                                if "matchteammembers" in base_url:
-                                    url = f"{config.API_URL}/api/v1/ta/MatchTeamMembers/{match_id}/"
-                                    cache_key = f"GET:{url}?images=false"
-                                    params = {"images": "false"}
-                                else:
-                                    url = base_url
-                                    cache_key = f"GET:{url}?matchId={match_id}"
-                                    params = {"matchId": match_id}
-                                
-                                await cache_manager.setup_refresh(
-                                    cache_key, url, ttl, refresh_until, params=params
-                                )
-                                logger.debug(f"Added cache refresh for changed match {match_id}: {cache_key}")
-                            except Exception as e:
-                                logger.error(f"Error setting up cache for match {match_id} endpoint {base_url}: {e}")
-                    
-                    # Set up cache entries for changed teams
-                    for team_id in changed_team_ids:
-                        try:
-                            url = f"{config.API_URL}/api/v1/ta/Team"
-                            cache_key = f"GET:{url}?teamId={team_id}"
-                            await cache_manager.setup_refresh(
-                                cache_key, url, ttl, refresh_until, params={"teamId": team_id}
-                            )
-                            logger.debug(f"Added cache refresh for changed team: {team_id}")
-                        except Exception as e:
-                            logger.error(f"Error setting up cache for team {team_id}: {e}")
-                    
-                    logger.info(f"Run {run_id}: Cache warming setup complete: {len(changed_match_ids)} matches, {len(changed_team_ids)} teams")
-                    
-                except Exception as e:
-                    logger.error(f"Run {run_id}: Failed to warm caches: {e}")
-                    # Don't raise - cache warming failure shouldn't stop the entire process
+                    logger.info(f"Run {run_id}: Cache warming setup complete")
                     
                 except Exception as e:
                     logger.error(f"Run {run_id}: Failed to compare and update cache: {e}")
