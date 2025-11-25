@@ -52,89 +52,24 @@ This document describes all Prometheus metrics exposed by the API Proxy service.
 
 ## Basic Cache Metrics
 
-### `cache_hits_total`
+### `cache_operations_total`
 
 -   **Type**: Counter
--   **Description**: Total number of successful cache hits (data served from cache)
+-   **Description**: Cache operations by type and endpoint with optional time labels for comprehensive cache activity tracking
 -   **Labels**:
-    -   `endpoint`: The API endpoint that was served from cache
+    -   `operation`: Type of cache operation ("hit", "miss", "refresh")
+    -   `endpoint`: The API endpoint
+    -   `hour`: Hour of day (0-23) for time-series analysis
+    -   `day_of_week`: Day of week (0=Monday, 6=Sunday) for pattern analysis
+    -   `date`: Date in YYYY-MM-DD format for daily tracking
 -   **Use Cases**:
-    -   Calculate cache hit ratios
-    -   Monitor cache effectiveness
-    -   Identify well-cached endpoints
-
-### `cache_misses_total`
-
--   **Type**: Counter
--   **Description**: Total number of cache misses (data fetched from upstream API)
--   **Labels**:
-    -   `endpoint`: The API endpoint that resulted in a cache miss
--   **Use Cases**:
-    -   Calculate cache hit ratios
-    -   Identify poorly cached endpoints
+    -   Calculate cache hit ratios: `sum(rate(cache_operations_total{operation="hit"}[5m])) / sum(rate(cache_operations_total[5m]))`
+    -   Monitor cache misses: `rate(cache_operations_total{operation="miss"}[5m])`
+    -   Track refresh operations: `rate(cache_operations_total{operation="refresh"}[5m])`
+    -   Analyze daily usage patterns by hour and day of week
+    -   Identify endpoints with high miss rates
     -   Monitor cache warming effectiveness
-
-### `cache_refresh_total`
-
--   **Type**: Counter
--   **Description**: Total number of cache refresh operations (background cache updates)
--   **Labels**:
-    -   `endpoint`: The API endpoint being refreshed
--   **Use Cases**:
-    -   Monitor cache refresh activity
-    -   Track background cache warming
-    -   Identify endpoints requiring frequent updates
-
----
-
-## Time-Based Cache Metrics
-
-These metrics include time labels for historical analysis and trend monitoring:
-
-### `cache_requests_by_time_total`
-
--   **Type**: Counter
--   **Description**: Total cache requests with detailed time labels for trend analysis
--   **Labels**:
-    -   `endpoint`: API endpoint
-    -   `hour`: Hour of day (0-23)
-    -   `day_of_week`: Day of week (0=Monday, 6=Sunday)
-    -   `date`: Date in YYYY-MM-DD format
--   **Use Cases**:
-    -   Analyze daily usage patterns
-    -   Identify peak hours
-    -   Weekly trend analysis
-    -   Capacity planning
-
-### `cache_hits_by_time_total`
-
--   **Type**: Counter
--   **Description**: Cache hits with time labels for detailed hit pattern analysis
--   **Labels**: Same as `cache_requests_by_time_total`
--   **Use Cases**:
-    -   Track cache efficiency over time
-    -   Identify optimal cache times
-    -   Monitor hit rate trends
-
-### `cache_misses_by_time_total`
-
--   **Type**: Counter
--   **Description**: Cache misses with time labels for miss pattern analysis
--   **Labels**: Same as `cache_requests_by_time_total`
--   **Use Cases**:
-    -   Identify cache warming opportunities
-    -   Track miss patterns
-    -   Optimize cache strategies
-
-### `cache_refresh_by_time_total`
-
--   **Type**: Counter
--   **Description**: Cache refreshes with time labels for refresh pattern analysis
--   **Labels**: Same as `cache_requests_by_time_total`
--   **Use Cases**:
-    -   Monitor refresh frequency
-    -   Optimize refresh scheduling
-    -   Track background cache activity
+-   **Migration Note**: Replaces deprecated metrics: `cache_hits_total`, `cache_misses_total`, `cache_refresh_total`, and their `*_by_time_total` variants
 
 ---
 
@@ -143,29 +78,21 @@ These metrics include time labels for historical analysis and trend monitoring:
 ### `cache_size`
 
 -   **Type**: Gauge
--   **Description**: Current number of items in cache (real-time cache size monitoring)
--   **Labels**: None
+-   **Description**: Current number of items in cache with time labels for both real-time and historical analysis
+-   **Labels**:
+    -   `hour`: Hour of day (0-23)
+    -   `day_of_week`: Day of week (0=Monday, 6=Sunday)
+    -   `date`: Date in YYYY-MM-DD format
 -   **Update Triggers**:
     -   Real-time updates on cache operations (cache_response, clear_cache, clear_all_cache)
     -   Background updates every 60 seconds
 -   **Use Cases**:
     -   Real-time cache monitoring
-    -   Alerting on cache size
-    -   Memory management
-    -   Live dashboard displays
-
-### `cache_items`
-
--   **Type**: Gauge
--   **Description**: Number of cached items with time labels for historical analysis
--   **Labels**:
-    -   `hour`: Hour of day (0-23)
-    -   `day_of_week`: Day of week (0=Monday, 6=Sunday)  
-    -   `date`: Date in YYYY-MM-DD format
--   **Use Cases**:
     -   Historical cache growth analysis
-    -   Time-based cache size patterns
+    -   Cache capacity planning
+    -   Live dashboard displays
     -   Weekly/daily cache usage trends
+-   **Migration Note**: Consolidates `cache_size` and `cache_items` into single metric with consistent time labels
 
 ### `cache_endpoints`
 
@@ -173,12 +100,13 @@ These metrics include time labels for historical analysis and trend monitoring:
 -   **Description**: Number of unique cached endpoints with time labels for endpoint diversity analysis
 -   **Labels**:
     -   `hour`: Hour of day (0-23)
-    -   `day_of_week`: Day of week (0=Monday, 6=Sunday)  
+    -   `day_of_week`: Day of week (0=Monday, 6=Sunday)
     -   `date`: Date in YYYY-MM-DD format
 -   **Use Cases**:
     -   Track endpoint coverage diversity
-    -   Monitor cache distribution across endpoints
+    -   Monitor endpoint distribution patterns
     -   Analyze endpoint usage patterns over time
+-   **Migration Note**: Now includes consistent time labels
 
 ### `cache_memory_usage_bytes`
 
@@ -190,6 +118,104 @@ These metrics include time labels for historical analysis and trend monitoring:
     -   Resource planning
     -   Performance optimization
 -   **Note**: Metric is defined but not actively updated in current implementation
+
+### `request_rate_per_second`
+
+-   **Type**: Gauge
+-   **Description**: Current request rate per second by endpoint
+-   **Labels**:
+    -   `endpoint`: API endpoint
+-   **Use Cases**:
+    -   Real-time load monitoring
+    -   Rate limiting decisions
+    -   Performance alerts
+-   **Note**: Metric is defined but not actively updated in current implementation
+
+---
+
+## Grafana Query Migration Guide
+
+### Deprecated Metrics → New Consolidated Metrics
+
+**Old Cache Hit Metric:**
+```promql
+# Deprecated
+cache_hits_total
+cache_hits_by_time_total
+
+# New Consolidated
+cache_operations_total{operation="hit"}
+```
+
+**Old Cache Miss Metric:**
+```promql
+# Deprecated
+cache_misses_total
+cache_misses_by_time_total
+
+# New Consolidated
+cache_operations_total{operation="miss"}
+```
+
+**Old Cache Refresh Metric:**
+```promql
+# Deprecated
+cache_refresh_total
+cache_refresh_by_time_total
+
+# New Consolidated
+cache_operations_total{operation="refresh"}
+```
+
+### Common Query Patterns
+
+**Cache Hit Rate:**
+```promql
+# Old approach
+rate(cache_hits_total[5m])
+
+# New approach
+rate(cache_operations_total{operation="hit"}[5m])
+```
+
+**Cache Hit Ratio (simpler!):**
+```promql
+# Old approach (complex)
+sum(rate(cache_hits_total[5m])) / (sum(rate(cache_hits_total[5m])) + sum(rate(cache_misses_total[5m])))
+
+# New approach (simpler)
+sum(rate(cache_operations_total{operation="hit"}[5m])) / sum(rate(cache_operations_total[5m]))
+```
+
+**Cache Operations by Time of Day:**
+```promql
+# Group by hour
+sum by (hour) (rate(cache_operations_total{operation="hit"}[1h]))
+
+# Group by day of week
+sum by (day_of_week) (rate(cache_operations_total[1d]))
+```
+
+**Endpoint-Specific Analysis:**
+```promql
+# Cache hits for specific endpoint
+rate(cache_operations_total{operation="hit",endpoint="/api/v1/ta/match/"}[5m])
+
+# All operations for endpoint
+sum by (operation) (rate(cache_operations_total{endpoint="/api/v1/ta/match/"}[5m]))
+```
+
+**Cache Size Queries:**
+```promql
+# Current cache size (must include time labels)
+cache_size{hour=~".*",day_of_week=~".*",date=~".*"}
+
+# Cache size by time of day
+avg by (hour) (cache_size)
+
+# Endpoint diversity
+cache_endpoints{hour=~".*",day_of_week=~".*",date=~".*"}
+```
 
 ---
 

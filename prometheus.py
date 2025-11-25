@@ -1,72 +1,65 @@
 # Copyright (C) 2025 Sasha Shipka <sasha.shipka@copyleft.no>
 # You may use, distribute and modify this code under the terms of the GNU General Public License v3.0
 
-from prometheus_client import Counter, Histogram, Gauge, Info
+from prometheus_client import Counter, Histogram, Gauge
 import time
 from datetime import datetime
 
-# Prometheus metrics
+# ============================================================================
+# HTTP Request Metrics
+# ============================================================================
+
 REQUEST_COUNT = Counter(
-    "http_requests_total", "Total HTTP requests", ["method", "endpoint", "has_id"]
+    "http_requests_total", 
+    "Total HTTP requests", 
+    ["method", "endpoint", "has_id"]
 )
+
 REQUEST_LATENCY = Histogram(
-    "http_request_duration_seconds", "HTTP request latency", ["method", "endpoint"]
-)
-CACHE_HITS = Counter("cache_hits_total", "Total cache hits", ["endpoint"])
-CACHE_MISSES = Counter("cache_misses_total", "Total cache misses", ["endpoint"])
-CACHE_REFRESH = Counter("cache_refresh_total", "Total cache refreshes", ["endpoint"])
-
-# Time-based cache metrics for graphing over time
-CACHE_REQUESTS_BY_TIME = Counter(
-    "cache_requests_by_time_total", 
-    "Total cache requests with time labels", 
-    ["endpoint", "hour", "day_of_week", "date"]
+    "http_request_duration_seconds", 
+    "HTTP request latency", 
+    ["method", "endpoint"]
 )
 
-# Cache hit and miss counters with time labels
-CACHE_HITS_BY_TIME = Counter(
-    "cache_hits_by_time_total",
-    "Cache hits with time labels",
-    ["endpoint", "hour", "day_of_week", "date"]
-)
-
-CACHE_MISSES_BY_TIME = Counter(
-    "cache_misses_by_time_total", 
-    "Cache misses with time labels",
-    ["endpoint", "hour", "day_of_week", "date"]
-)
-
-CACHE_REFRESH_BY_TIME = Counter(
-    "cache_refresh_by_time_total",
-    "Cache refreshes with time labels", 
-    ["endpoint", "hour", "day_of_week", "date"]
-)
-
-# Cache size metrics with time labels
-CACHE_ITEMS_BY_TIME = Gauge(
-    "cache_items",
-    "Number of cached items with time labels",
-    ["hour", "day_of_week", "date"]
-)
-
-CACHE_ENDPOINTS_BY_TIME = Gauge(
-    "cache_endpoints", 
-    "Number of unique cached endpoints with time labels",
-    ["hour", "day_of_week", "date"]
-)
-
-# Current cache size and status
-CACHE_SIZE = Gauge("cache_size", "Number of items currently in cache")
-CACHE_MEMORY_USAGE = Gauge("cache_memory_usage_bytes", "Cache memory usage in bytes")
-
-# Request rate gauges (requests per second)
 REQUEST_RATE = Gauge(
     "request_rate_per_second",
     "Current request rate per second",
     ["endpoint"]
 )
 
-# Helper function to get time labels for metrics
+# ============================================================================
+# Cache Metrics - Consolidated with optional time labels
+# ============================================================================
+
+# Core cache operation counters (supports both simple and time-based queries)
+CACHE_OPERATIONS = Counter(
+    "cache_operations_total",
+    "Cache operations by type and endpoint with optional time labels",
+    ["operation", "endpoint", "hour", "day_of_week", "date"]
+)
+
+# Current cache state
+CACHE_SIZE = Gauge(
+    "cache_size", 
+    "Current number of items in cache with optional time labels",
+    ["hour", "day_of_week", "date"]
+)
+
+CACHE_ENDPOINTS = Gauge(
+    "cache_endpoints",
+    "Number of unique cached endpoints with optional time labels", 
+    ["hour", "day_of_week", "date"]
+)
+
+CACHE_MEMORY_USAGE = Gauge(
+    "cache_memory_usage_bytes", 
+    "Cache memory usage in bytes"
+)
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
 def get_time_labels():
     """Get current time labels for time-based metrics"""
     now = datetime.now()
@@ -76,46 +69,35 @@ def get_time_labels():
         "date": now.strftime("%Y-%m-%d")
     }
 
-# Helper functions for updating metrics
 def record_cache_request(endpoint, hit=True):
-    """Record a cache request with time-based labels"""
+    """Record a cache request with time-based labels
+    
+    Args:
+        endpoint: The cache endpoint
+        hit: True for cache hit, False for cache miss
+    """
     time_labels = get_time_labels()
     
-    # Record the time-based counter for all requests
-    CACHE_REQUESTS_BY_TIME.labels(
+    # Record hit or miss in consolidated metric
+    operation = "hit" if hit else "miss"
+    CACHE_OPERATIONS.labels(
+        operation=operation,
         endpoint=endpoint,
         hour=time_labels["hour"],
         day_of_week=time_labels["day_of_week"],
         date=time_labels["date"]
     ).inc()
-    
-    # Record hit or miss with time labels
-    if hit:
-        CACHE_HITS.labels(endpoint=endpoint).inc()
-        CACHE_HITS_BY_TIME.labels(
-            endpoint=endpoint,
-            hour=time_labels["hour"],
-            day_of_week=time_labels["day_of_week"],
-            date=time_labels["date"]
-        ).inc()
-    else:
-        CACHE_MISSES.labels(endpoint=endpoint).inc()
-        CACHE_MISSES_BY_TIME.labels(
-            endpoint=endpoint,
-            hour=time_labels["hour"],
-            day_of_week=time_labels["day_of_week"],
-            date=time_labels["date"]
-        ).inc()
 
 def record_cache_refresh(endpoint):
-    """Record a cache refresh with time-based labels"""
+    """Record a cache refresh with time-based labels
+    
+    Args:
+        endpoint: The cache endpoint being refreshed
+    """
     time_labels = get_time_labels()
     
-    # Record the original refresh counter
-    CACHE_REFRESH.labels(endpoint=endpoint).inc()
-    
-    # Record refresh with time labels
-    CACHE_REFRESH_BY_TIME.labels(
+    CACHE_OPERATIONS.labels(
+        operation="refresh",
         endpoint=endpoint,
         hour=time_labels["hour"],
         day_of_week=time_labels["day_of_week"],
@@ -123,20 +105,22 @@ def record_cache_refresh(endpoint):
     ).inc()
 
 def update_cache_size_metrics(total_items, unique_endpoints):
-    """Update cache size metrics with current counts and time labels"""
+    """Update cache size metrics with current counts and time labels
+    
+    Args:
+        total_items: Total number of items in cache
+        unique_endpoints: Number of unique cached endpoints
+    """
     time_labels = get_time_labels()
     
-    # Update current cache size (without time labels)
-    CACHE_SIZE.set(total_items)
-    
-    # Update time-based cache metrics
-    CACHE_ITEMS_BY_TIME.labels(
+    # Update cache size with time labels
+    CACHE_SIZE.labels(
         hour=time_labels["hour"],
         day_of_week=time_labels["day_of_week"], 
         date=time_labels["date"]
     ).set(total_items)
     
-    CACHE_ENDPOINTS_BY_TIME.labels(
+    CACHE_ENDPOINTS.labels(
         hour=time_labels["hour"],
         day_of_week=time_labels["day_of_week"],
         date=time_labels["date"]
@@ -149,11 +133,37 @@ async def update_current_cache_size():
         redis_client = get_redis_client()
         keys = await redis_client.keys("GET:*")
         total_items = len(keys)
-        CACHE_SIZE.set(total_items)
+        
+        time_labels = get_time_labels()
+        CACHE_SIZE.labels(
+            hour=time_labels["hour"],
+            day_of_week=time_labels["day_of_week"],
+            date=time_labels["date"]
+        ).set(total_items)
+        
         await redis_client.close()
     except Exception:
         # If we can't update, just continue - periodic update will catch it
         pass
 
-# Remove the problematic update_cache_hit_ratio function for now
-# We can calculate hit ratios in Grafana using the time-based counters
+# ============================================================================
+# Migration Notes
+# ============================================================================
+# 
+# Old metrics have been consolidated:
+# - cache_hits_total, cache_misses_total, cache_refresh_total 
+#   → cache_operations_total{operation="hit|miss|refresh"}
+#
+# - cache_hits_by_time_total, cache_misses_by_time_total, cache_refresh_by_time_total
+#   → cache_operations_total (with time labels)
+#
+# - cache_items, cache_endpoints (now include time labels consistently)
+#   → cache_size{hour,day_of_week,date}, cache_endpoints{hour,day_of_week,date}
+#
+# Grafana queries should use:
+#   rate(cache_operations_total{operation="hit"}[5m]) - for hit rate
+#   rate(cache_operations_total{operation="miss"}[5m]) - for miss rate
+#   rate(cache_operations_total{operation="refresh"}[5m]) - for refresh rate
+#
+#   sum(rate(cache_operations_total{operation="hit"}[5m])) / 
+#   sum(rate(cache_operations_total[5m])) - for hit ratio
