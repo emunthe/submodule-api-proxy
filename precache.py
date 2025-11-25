@@ -19,6 +19,16 @@ from .util import get_http_client, get_logger, get_redis_client
 
 logger = get_logger(__name__)
 
+# Batch processing configuration to prevent overwhelming the system
+MAX_CONCURRENT_CACHE_SETUPS = 10  # Max simultaneous cache setup operations
+BATCH_SIZE = 50  # Process cache entries in batches of 50
+BATCH_DELAY = 2.0  # Delay between batches in seconds
+CACHE_SETUP_DELAY = 0.1  # Delay between individual cache setups
+MAX_MATCHES_TO_CACHE = 1000  # Maximum number of matches to cache in one run
+
+# Global flag to track if cache warming is in progress
+CACHE_WARMING_IN_PROGRESS = False
+
 # Prometheus metrics for pre-cache operations
 PRECACHE_RUNS_TOTAL = Counter(
     "precache_runs_total",
@@ -1155,11 +1165,79 @@ async def compare_and_update_cache(fresh_data_result, cache_manager, run_id, sta
             await redis_client.close()
 
 
+async def process_match_cache_batch(match_batch, match_endpoint_configs, cache_manager, ttl, refresh_until, run_id):
+    """Process a batch of matches for cache warming with rate limiting"""
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_CACHE_SETUPS)
+    
+    async def setup_match_cache(match_id):
+        async with semaphore:
+            for endpoint_config in match_endpoint_configs:
+                try:
+                    if endpoint_config.get("path_param"):
+                        # Path includes match_id (e.g., matchteammembers)
+                        path = endpoint_config["path"].format(match_id=match_id)
+                        target_url = f"{config.API_URL}/{path}"
+                        cache_key = f"GET:{path}?{endpoint_config['param_key']}={endpoint_config['param_value']}"
+                        params = {endpoint_config["param_key"]: endpoint_config["param_value"]}
+                    else:
+                        # Query parameter includes match_id
+                        path = endpoint_config["path"]
+                        target_url = f"{config.API_URL}/{path}"
+                        cache_key = f"GET:{path}?{endpoint_config['param_key']}={match_id}"
+                        params = {endpoint_config["param_key"]: match_id}
+                    
+                    await cache_manager.setup_refresh(
+                        cache_key, target_url, ttl, refresh_until, params=params
+                    )
+                    logger.debug(f"Added cache refresh for changed match {match_id}: {cache_key}")
+                    
+                    # Small delay between cache setups to prevent overwhelming Redis
+                    await asyncio.sleep(CACHE_SETUP_DELAY)
+                    
+                except Exception as e:
+                    logger.error(f"Error setting up cache for match {match_id} endpoint {endpoint_config['path']}: {e}")
+    
+    # Process all matches in this batch concurrently but with limited concurrency
+    tasks = [setup_match_cache(match_id) for match_id in match_batch]
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def process_team_cache_batch(team_batch, cache_manager, ttl, refresh_until, run_id):
+    """Process a batch of teams for cache warming with rate limiting"""
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_CACHE_SETUPS)
+    
+    async def setup_team_cache(team_id):
+        async with semaphore:
+            try:
+                # Construct URL and cache key to match format from main.py
+                # main.py uses: cache_key = f"{request.method}:{key_path}" where key_path includes query params
+                path = f"api/v1/org/teams"
+                target_url = f"{config.API_URL}/{path}"
+                # Cache key format: GET:path?params (matching main.py line 642)
+                cache_key = f"GET:{path}?orgId={team_id}"
+                await cache_manager.setup_refresh(
+                    cache_key, target_url, ttl, refresh_until, params={"orgId": team_id}
+                )
+                logger.debug(f"Added cache refresh for changed team: {team_id} with cache_key: {cache_key}")
+                
+                # Small delay between cache setups to prevent overwhelming Redis
+                await asyncio.sleep(CACHE_SETUP_DELAY)
+                
+            except Exception as e:
+                logger.error(f"Error setting up cache for team {team_id}: {e}")
+    
+    # Process all teams in this batch concurrently but with limited concurrency
+    tasks = [setup_team_cache(team_id) for team_id in team_batch]
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
 async def detect_change_tournaments_and_matches(cache_manager, token_manager):
     """Periodically fetch season, tournament, match and team data.
 
     This function fetches data from the DATA.NIF.NO API, compares it to cached data,
     """
+    
+    global CACHE_WARMING_IN_PROGRESS
     
     try:
         # Log function entry
@@ -1172,6 +1250,13 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
     while True:
         try:
             loop_iteration += 1
+            
+            # Check if cache warming is in progress
+            if CACHE_WARMING_IN_PROGRESS:
+                logger.info(f"Precache iteration {loop_iteration} skipped - cache warming in progress")
+                await asyncio.sleep(30)  # Wait 30 seconds before checking again
+                continue
+                
             logger.info(f"Starting precache loop iteration {loop_iteration}")
             
             start_time = pendulum.now()
@@ -1230,6 +1315,18 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                     changed_match_ids = comparison_result["changed_match_ids"]
                     upstream_status = comparison_result["upstream_status"]
 
+                    # These are the endpoints we want to warm for a match page:
+                    # api/v1/org/teams?orgId=
+                    # api/v1/org/teams?orgId=
+                    # api/v1/ta/match/?matchId=
+                    # api/v1/ta/matchincidents/?matchId=
+                    # api/v1/ta/matchreferee?matchId=
+                    # api/v1/ta/matchteammembers/8224291/?images=false
+                    # api/v1/ta/tournament/?tournamentId=440904
+                    # api/v1/ta/tournament/season/201065/?hierarchy=true
+                    # api/v1/ta/venue/?venueId=10143
+                    # api/v1/ta/venueunit/?venueUnitId=33866
+
                     # if upstream_status is DOWN, do not replace data stored in any cache
                     if upstream_status == "DOWN":
                         logger.error(f"Run {run_id}: Upstream status is DOWN, aborting cache update")
@@ -1238,59 +1335,81 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                     # Step 3: Warm caches for changed items
                     logger.info(f"Run {run_id}: Step 3 - Warming caches for changed items")
                     
-                    # Define cache warming parameters
-                    refresh_until = pendulum.now().add(days=7)
-                    ttl = 7 * 24 * 60 * 60
-
-                    if changed_tournament_ids:
-                        logger.info(f"Run {run_id}: Detected changes in {len(changed_tournament_ids)} tournaments")
-
-                    if changed_team_ids:
-                        logger.info(f"Run {run_id}: Detected changes in {len(changed_team_ids)} teams")
-
-                        # Set up cache entries for changed teams
-                        # for team_id in changed_team_ids:
-                        #     try:
-                        #         url = f"{config.API_URL}/api/v1/ta/Team"
-                        #         cache_key = f"GET:{url}?teamId={team_id}"
-                        #         await cache_manager.setup_refresh(
-                        #             cache_key, url, ttl, refresh_until, params={"teamId": team_id}
-                        #         )
-                        #         logger.debug(f"Added cache refresh for changed team: {team_id}")
-                        #     except Exception as e:
-                        #         logger.error(f"Error setting up cache for team {team_id}: {e}")
-
-                    if changed_match_ids:
-                        logger.info(f"Run {run_id}: Detected changes in {len(changed_match_ids)} matches")
-                        
-                        # Set up cache entries for match-related endpoints
-                        # match_endpoint_templates = [
-                        #     f"{config.API_URL}/api/v1/ta/match/",
-                        #     f"{config.API_URL}/api/v1/ta/matchincidents/",
-                        #     f"{config.API_URL}/api/v1/ta/matchreferee",
-                        #     f"{config.API_URL}/api/v1/ta/matchteammembers/"
-                        # ]
-                        # 
-                        # for match_id in changed_match_ids:
-                        #     for base_url in match_endpoint_templates:
-                        #         try:
-                        #             if "matchteammembers" in base_url:
-                        #                 url = f"{config.API_URL}/api/v1/ta/MatchTeamMembers/{match_id}/"
-                        #                 cache_key = f"GET:{url}?images=false"
-                        #                 params = {"images": "false"}
-                        #             else:
-                        #                 url = base_url
-                        #                 cache_key = f"GET:{url}?matchId={match_id}"
-                        #                 params = {"matchId": match_id}
-                        #             
-                        #             await cache_manager.setup_refresh(
-                        #                 cache_key, url, ttl, refresh_until, params=params
-                        #             )
-                        #             logger.debug(f"Added cache refresh for changed match {match_id}: {cache_key}")
-                        #         except Exception as e:
-                        #             logger.error(f"Error setting up cache for match {match_id} endpoint {base_url}: {e}")
+                    # Set cache warming flag to prevent other iterations from running
+                    cache_warming_needed = bool(changed_tournament_ids or changed_team_ids or changed_match_ids)
                     
-                    logger.info(f"Run {run_id}: Cache warming setup complete")
+                    if cache_warming_needed:
+                        CACHE_WARMING_IN_PROGRESS = True
+                        logger.info(f"Run {run_id}: Cache warming started - future precache iterations will be suspended")
+                    
+                    try:
+                        # Define cache warming parameters
+                        refresh_until = pendulum.now().add(days=7)
+                        ttl = 7 * 24 * 60 * 60
+
+                        if changed_tournament_ids:
+                            logger.info(f"Run {run_id}: Detected changes in {len(changed_tournament_ids)} tournaments")
+
+                        if changed_team_ids:
+                            logger.info(f"Run {run_id}: Detected changes in {len(changed_team_ids)} teams")
+                            
+                            # Process teams in batches to prevent overwhelming the system
+                            team_ids_list = list(changed_team_ids)
+                            for batch_start in range(0, len(team_ids_list), BATCH_SIZE):
+                                batch_end = min(batch_start + BATCH_SIZE, len(team_ids_list))
+                                team_batch = team_ids_list[batch_start:batch_end]
+                                
+                                logger.info(f"Run {run_id}: Processing team batch {batch_start//BATCH_SIZE + 1}/{(len(team_ids_list) + BATCH_SIZE - 1)//BATCH_SIZE} ({len(team_batch)} teams)")
+                                
+                                # Process this batch of teams
+                                await process_team_cache_batch(team_batch, cache_manager, ttl, refresh_until, run_id)
+                                
+                                # Delay between batches to prevent overwhelming the system
+                                if batch_end < len(team_ids_list):
+                                    logger.debug(f"Run {run_id}: Waiting {BATCH_DELAY}s before next batch")
+                                    await asyncio.sleep(BATCH_DELAY)
+
+                        if changed_match_ids:
+                            # Limit the number of matches to cache to prevent system overload
+                            if len(changed_match_ids) > MAX_MATCHES_TO_CACHE:
+                                logger.warning(f"Run {run_id}: Too many changed matches ({len(changed_match_ids)}), limiting to {MAX_MATCHES_TO_CACHE} most recent ones")
+                                changed_match_ids = set(list(changed_match_ids)[:MAX_MATCHES_TO_CACHE])
+                            
+                            logger.info(f"Run {run_id}: Detected changes in {len(changed_match_ids)} matches")
+                            total_cache_entries = len(changed_match_ids) * 4  # 4 endpoints per match
+                            logger.info(f"Run {run_id}: Will create {total_cache_entries} cache entries in batches")
+                            
+                            # Set up cache entries for match-related endpoints
+                            match_endpoint_configs = [
+                                {"path": "api/v1/ta/match/", "param_key": "matchId", "path_param": False},
+                                {"path": "api/v1/ta/matchincidents/", "param_key": "matchId", "path_param": False},
+                                {"path": "api/v1/ta/matchreferee", "param_key": "matchId", "path_param": False},
+                                {"path": "api/v1/ta/matchteammembers/{match_id}/", "param_key": "images", "param_value": "false", "path_param": True}
+                            ]
+                            
+                            # Process matches in batches to prevent overwhelming the system
+                            match_ids_list = list(changed_match_ids)
+                            for batch_start in range(0, len(match_ids_list), BATCH_SIZE):
+                                batch_end = min(batch_start + BATCH_SIZE, len(match_ids_list))
+                                match_batch = match_ids_list[batch_start:batch_end]
+                                
+                                logger.info(f"Run {run_id}: Processing match batch {batch_start//BATCH_SIZE + 1}/{(len(match_ids_list) + BATCH_SIZE - 1)//BATCH_SIZE} ({len(match_batch)} matches)")
+                                
+                                # Process this batch of matches
+                                await process_match_cache_batch(match_batch, match_endpoint_configs, cache_manager, ttl, refresh_until, run_id)
+                                
+                                # Delay between batches to prevent overwhelming the system
+                                if batch_end < len(match_ids_list):
+                                    logger.debug(f"Run {run_id}: Waiting {BATCH_DELAY}s before next batch")
+                                    await asyncio.sleep(BATCH_DELAY)
+                        
+                        logger.info(f"Run {run_id}: Cache warming setup complete")
+                        
+                    finally:
+                        # Always clear the cache warming flag when done
+                        if cache_warming_needed:
+                            CACHE_WARMING_IN_PROGRESS = False
+                            logger.info(f"Run {run_id}: Cache warming completed - precache iterations can resume")
                     
                 except Exception as e:
                     logger.error(f"Run {run_id}: Failed to compare and update cache: {e}")
