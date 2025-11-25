@@ -16,8 +16,6 @@ from .cache import CacheManager
 from .config import config
 from .precache import detect_change_tournaments_and_matches, clear_precache_data
 from .prometheus import (
-    CACHE_HITS,
-    CACHE_MISSES,
     REQUEST_COUNT,
     REQUEST_LATENCY,
     record_cache_request,
