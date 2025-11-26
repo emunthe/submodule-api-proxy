@@ -916,6 +916,11 @@ async def compare_and_update_cache(fresh_data_result, cache_manager, run_id, sta
         
         logger.info(f"Run {run_id}: COMPARE AND UPDATE CACHE starting - comparing fresh data with cached data")
         
+        # what to do with         # 
+        # api/v1/org/clubsbysport/72/ 
+        # api/v1/org/clubsbysport/151/
+        # venues
+
         # Helper function to record changes
         def _record_changes(category, count):
             """Helper function to record changes in both old and new metrics"""
@@ -1384,7 +1389,9 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                                 {"path": "api/v1/ta/match/", "param_key": "matchId", "path_param": False},
                                 {"path": "api/v1/ta/matchincidents/", "param_key": "matchId", "path_param": False},
                                 {"path": "api/v1/ta/matchreferee", "param_key": "matchId", "path_param": False},
-                                {"path": "api/v1/ta/matchteammembers/{match_id}/", "param_key": "images", "param_value": "false", "path_param": True}
+                                {"path": "api/v1/ta/matchteammembers/{match_id}/", "param_key": "images", "param_value": "false", "path_param": True},
+                                {"path": "api/v1/ta/venue/", "param_key": "venueId", "path_param": False},
+                                {"path": "api/v1/ta/venueunit/", "param_key": "venueId", "path_param": False}
                             ]
                             
                             # Process matches in batches to prevent overwhelming the system

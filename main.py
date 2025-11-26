@@ -102,9 +102,15 @@ async def update_cache_metrics_periodically():
 @app.on_event("startup")
 async def startup_event():
     global precache_task
-    precache_task = asyncio.create_task(detect_change_tournaments_and_matches(cache_manager, token_manager))
-    background_tasks.add(precache_task)
-    precache_task.add_done_callback(background_tasks.discard)
+    
+    # Only start precache if configured to do so
+    if config.PRECACHE_AUTO_START:
+        logger.info("PRECACHE_AUTO_START is enabled - starting precache task on startup")
+        precache_task = asyncio.create_task(detect_change_tournaments_and_matches(cache_manager, token_manager))
+        background_tasks.add(precache_task)
+        precache_task.add_done_callback(background_tasks.discard)
+    else:
+        logger.info("PRECACHE_AUTO_START is disabled - precache task not started on startup")
     
     # Start cache metrics update task
     cache_metrics_task = asyncio.create_task(update_cache_metrics_periodically())

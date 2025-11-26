@@ -27,5 +27,6 @@ config = Box(
         "MAX_CONNECTIONS": int(os.getenv("MAX_CONNECTIONS", 100)),
         "MAX_KEEPALIVE_CONNECTIONS": int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", 20)),
         "MAX_REDIS_CONNECTIONS": int(os.getenv("MAX_REDIS_CONNECTIONS", 100)),
+        "PRECACHE_AUTO_START": os.getenv("PRECACHE_AUTO_START", "false").lower() in ("true", "1", "yes", "on"),
     })
     
