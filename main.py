@@ -18,6 +18,9 @@ from .precache import detect_change_tournaments_and_matches, clear_precache_data
 from .prometheus import (
     REQUEST_COUNT,
     REQUEST_LATENCY,
+    CACHE_HITS,
+    CACHE_MISSES,
+    CACHE_HIT_RATIO,
     record_cache_request,
     update_cache_size_metrics,
 )

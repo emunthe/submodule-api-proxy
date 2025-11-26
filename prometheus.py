@@ -38,6 +38,19 @@ CACHE_OPERATIONS = Counter(
     ["operation", "endpoint", "hour", "day_of_week", "date"]
 )
 
+# Dedicated cache hit/miss metrics for simpler queries
+CACHE_HITS = Counter(
+    "cache_hits_total",
+    "Total cache hits by endpoint",
+    ["endpoint"]
+)
+
+CACHE_MISSES = Counter(
+    "cache_misses_total", 
+    "Total cache misses by endpoint",
+    ["endpoint"]
+)
+
 # Current cache state
 CACHE_SIZE = Gauge(
     "cache_size", 
@@ -54,6 +67,12 @@ CACHE_ENDPOINTS = Gauge(
 CACHE_MEMORY_USAGE = Gauge(
     "cache_memory_usage_bytes", 
     "Cache memory usage in bytes"
+)
+
+CACHE_HIT_RATIO = Gauge(
+    "cache_hit_ratio",
+    "Current cache hit ratio (hits / total requests)",
+    ["endpoint"]
 )
 
 # ============================================================================
@@ -87,6 +106,34 @@ def record_cache_request(endpoint, hit=True):
         day_of_week=time_labels["day_of_week"],
         date=time_labels["date"]
     ).inc()
+    
+    # Record in dedicated metrics for simpler queries
+    if hit:
+        CACHE_HITS.labels(endpoint=endpoint).inc()
+    else:
+        CACHE_MISSES.labels(endpoint=endpoint).inc()
+    
+    # Update hit ratio for this endpoint
+    update_cache_hit_ratio(endpoint)
+
+def update_cache_hit_ratio(endpoint):
+    """Update the cache hit ratio metric for an endpoint
+    
+    Args:
+        endpoint: The cache endpoint to update ratio for
+    """
+    try:
+        # Get current hit and miss counts for this endpoint
+        hits = CACHE_HITS.labels(endpoint=endpoint)._value._value
+        misses = CACHE_MISSES.labels(endpoint=endpoint)._value._value
+        
+        total = hits + misses
+        if total > 0:
+            hit_ratio = hits / total
+            CACHE_HIT_RATIO.labels(endpoint=endpoint).set(hit_ratio)
+    except Exception:
+        # If we can't calculate ratio, just continue
+        pass
 
 def record_cache_refresh(endpoint):
     """Record a cache refresh with time-based labels
@@ -150,20 +197,28 @@ async def update_current_cache_size():
 # Migration Notes
 # ============================================================================
 # 
-# Old metrics have been consolidated:
-# - cache_hits_total, cache_misses_total, cache_refresh_total 
-#   → cache_operations_total{operation="hit|miss|refresh"}
+# Cache metrics are available in two forms:
+# 1. Consolidated metrics with time labels:
+#    - cache_operations_total{operation="hit|miss|refresh"} - with time labels
+# 2. Dedicated simple metrics:
+#    - cache_hits_total - simple counter by endpoint
+#    - cache_misses_total - simple counter by endpoint
 #
-# - cache_hits_by_time_total, cache_misses_by_time_total, cache_refresh_by_time_total
-#   → cache_operations_total (with time labels)
+# The consolidated metric supports time-based analysis:
+# - cache_operations_total (with time labels hour, day_of_week, date)
 #
-# - cache_items, cache_endpoints (now include time labels consistently)
-#   → cache_size{hour,day_of_week,date}, cache_endpoints{hour,day_of_week,date}
+# Cache size metrics include time labels consistently:
+# - cache_size{hour,day_of_week,date}, cache_endpoints{hour,day_of_week,date}
 #
-# Grafana queries should use:
-#   rate(cache_operations_total{operation="hit"}[5m]) - for hit rate
-#   rate(cache_operations_total{operation="miss"}[5m]) - for miss rate
-#   rate(cache_operations_total{operation="refresh"}[5m]) - for refresh rate
+# Grafana queries:
+#   rate(cache_hits_total[5m]) - simple hit rate
+#   rate(cache_misses_total[5m]) - simple miss rate
+#   rate(cache_operations_total{operation="hit"}[5m]) - hit rate with time labels
+#   rate(cache_operations_total{operation="miss"}[5m]) - miss rate with time labels
+#   rate(cache_operations_total{operation="refresh"}[5m]) - refresh rate
+#
+#   sum(rate(cache_hits_total[5m])) / 
+#   (sum(rate(cache_hits_total[5m])) + sum(rate(cache_misses_total[5m]))) - hit ratio
 #
 #   sum(rate(cache_operations_total{operation="hit"}[5m])) / 
-#   sum(rate(cache_operations_total[5m])) - for hit ratio
+#   sum(rate(cache_operations_total[5m])) - hit ratio (alternative)

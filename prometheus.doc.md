@@ -2,7 +2,11 @@
 
 This document describes all Prometheus metrics exposed by the API Proxy service. These metrics provide comprehensive monitoring and observability for cache performance, request patterns, and system health.
 
-*Last updated: November 24, 2025*
+*Last updated: November 26, 2025*
+
+## Recent Updates
+
+**November 26, 2025**: Added dedicated cache hit/miss metrics (`cache_hits_total`, `cache_misses_total`, `cache_hit_ratio`) alongside existing consolidated metrics for easier querying and real-time monitoring. Both approaches are now available for maximum flexibility.
 
 ## Table of Contents
 
@@ -69,7 +73,44 @@ This document describes all Prometheus metrics exposed by the API Proxy service.
     -   Analyze daily usage patterns by hour and day of week
     -   Identify endpoints with high miss rates
     -   Monitor cache warming effectiveness
--   **Migration Note**: Replaces deprecated metrics: `cache_hits_total`, `cache_misses_total`, `cache_refresh_total`, and their `*_by_time_total` variants
+-   **Note**: Provides comprehensive cache operation tracking with full temporal labeling
+
+### `cache_hits_total`
+
+-   **Type**: Counter
+-   **Description**: Total cache hits by endpoint (simplified metric for easier querying)
+-   **Labels**:
+    -   `endpoint`: The API endpoint
+-   **Use Cases**:
+    -   Simple cache hit rate monitoring: `rate(cache_hits_total[5m])`
+    -   Quick hit ratio calculations: `sum(rate(cache_hits_total[5m])) / (sum(rate(cache_hits_total[5m])) + sum(rate(cache_misses_total[5m])))`
+    -   Basic cache performance dashboards
+    -   Alerting on cache hit patterns
+
+### `cache_misses_total`
+
+-   **Type**: Counter
+-   **Description**: Total cache misses by endpoint (simplified metric for easier querying)
+-   **Labels**:
+    -   `endpoint`: The API endpoint
+-   **Use Cases**:
+    -   Simple cache miss rate monitoring: `rate(cache_misses_total[5m])`
+    -   Quick miss ratio calculations
+    -   Basic cache performance dashboards
+    -   Alerting on cache miss patterns
+
+### `cache_hit_ratio`
+
+-   **Type**: Gauge
+-   **Description**: Current cache hit ratio (hits / total requests) by endpoint
+-   **Labels**:
+    -   `endpoint`: The API endpoint
+-   **Value**: Real-time hit ratio (0.0 to 1.0)
+-   **Use Cases**:
+    -   Instant cache efficiency monitoring
+    -   Real-time performance alerts: `cache_hit_ratio < 0.8`
+    -   Dashboard gauge displays
+    -   Quick cache health assessment
 
 ---
 
@@ -135,56 +176,74 @@ This document describes all Prometheus metrics exposed by the API Proxy service.
 
 ## Grafana Query Migration Guide
 
-### Deprecated Metrics → New Consolidated Metrics
+### Cache Metrics: Dual Approach
 
-**Old Cache Hit Metric:**
+The API proxy provides both dedicated simple metrics and consolidated time-labeled metrics for maximum flexibility:
+
+**Simple Dedicated Metrics (for easy querying):**
 ```promql
-# Deprecated
+# Simple cache hits
 cache_hits_total
-cache_hits_by_time_total
 
-# New Consolidated
-cache_operations_total{operation="hit"}
-```
-
-**Old Cache Miss Metric:**
-```promql
-# Deprecated
+# Simple cache misses  
 cache_misses_total
-cache_misses_by_time_total
 
-# New Consolidated
-cache_operations_total{operation="miss"}
+# Current hit ratio
+cache_hit_ratio
 ```
 
-**Old Cache Refresh Metric:**
+**Consolidated Time-Labeled Metrics (for detailed analysis):**
 ```promql
-# Deprecated
-cache_refresh_total
-cache_refresh_by_time_total
+# Cache hits with time labels
+cache_operations_total{operation="hit"}
 
-# New Consolidated
+# Cache misses with time labels
+cache_operations_total{operation="miss"}
+
+# Cache refreshes with time labels
 cache_operations_total{operation="refresh"}
+```
+
+**Migration from Deprecated Metrics:**
+```promql
+# Old deprecated metrics (no longer used)
+# cache_hits_by_time_total → cache_operations_total{operation="hit"}
+# cache_misses_by_time_total → cache_operations_total{operation="miss"}
+# cache_refresh_by_time_total → cache_operations_total{operation="refresh"}
 ```
 
 ### Common Query Patterns
 
 **Cache Hit Rate:**
 ```promql
-# Old approach
+# Simple approach (dedicated metrics)
 rate(cache_hits_total[5m])
 
-# New approach
+# Advanced approach (with time labels)
 rate(cache_operations_total{operation="hit"}[5m])
 ```
 
-**Cache Hit Ratio (simpler!):**
+**Cache Hit Ratio:**
 ```promql
-# Old approach (complex)
-sum(rate(cache_hits_total[5m])) / (sum(rate(cache_hits_total[5m])) + sum(rate(cache_misses_total[5m])))
+# Current hit ratio (real-time gauge)
+cache_hit_ratio
 
-# New approach (simpler)
-sum(rate(cache_operations_total{operation="hit"}[5m])) / sum(rate(cache_operations_total[5m]))
+# Calculated ratio (simple metrics)
+sum(rate(cache_hits_total[5m])) / 
+(sum(rate(cache_hits_total[5m])) + sum(rate(cache_misses_total[5m])))
+
+# Calculated ratio (consolidated metrics)
+sum(rate(cache_operations_total{operation="hit"}[5m])) / 
+sum(rate(cache_operations_total[5m]))
+```
+
+**Cache Miss Rate:**
+```promql
+# Simple approach
+rate(cache_misses_total[5m])
+
+# Advanced approach (with time labels)
+rate(cache_operations_total{operation="miss"}[5m])
 ```
 
 **Cache Operations by Time of Day:**
@@ -198,11 +257,23 @@ sum by (day_of_week) (rate(cache_operations_total[1d]))
 
 **Endpoint-Specific Analysis:**
 ```promql
-# Cache hits for specific endpoint
+# Cache hits for specific endpoint (simple)
+rate(cache_hits_total{endpoint="/api/v1/ta/match/"}[5m])
+
+# Cache hits for specific endpoint (with time labels)
 rate(cache_operations_total{operation="hit",endpoint="/api/v1/ta/match/"}[5m])
 
-# All operations for endpoint
+# Hit ratio for specific endpoint (real-time)
+cache_hit_ratio{endpoint="/api/v1/ta/match/"}
+
+# All operations for endpoint (consolidated view)
 sum by (operation) (rate(cache_operations_total{endpoint="/api/v1/ta/match/"}[5m]))
+
+# Top endpoints by hit rate
+topk(10, rate(cache_hits_total[5m]))
+
+# Endpoints with lowest hit ratios
+bottomk(5, cache_hit_ratio)
 ```
 
 **Cache Size Queries:**
@@ -1032,26 +1103,63 @@ Returns a dictionary with current time labels:
 **Cache Hit Rate Over Time:**
 
 ```promql
-rate(cache_hits_by_time_total[5m]) /
-(rate(cache_hits_by_time_total[5m]) + rate(cache_misses_by_time_total[5m])) * 100
+# Simple approach with dedicated metrics
+rate(cache_hits_total[5m])
+
+# Advanced approach with time labels
+rate(cache_operations_total{operation="hit"}[5m])
+```
+
+**Cache Hit Ratio:**
+
+```promql
+# Real-time hit ratio (gauge)
+cache_hit_ratio
+
+# Calculated hit ratio (simple metrics)
+sum(rate(cache_hits_total[5m])) / 
+(sum(rate(cache_hits_total[5m])) + sum(rate(cache_misses_total[5m]))) * 100
+
+# Calculated hit ratio (consolidated metrics)
+sum(rate(cache_operations_total{operation="hit"}[5m])) / 
+sum(rate(cache_operations_total[5m])) * 100
 ```
 
 **Top 5 Most Active Endpoints:**
 
 ```promql
-topk(5, sum by (endpoint) (rate(cache_requests_by_time_total[1h])))
+# By hit rate
+topk(5, sum by (endpoint) (rate(cache_hits_total[1h])))
+
+# By total operations (consolidated)
+topk(5, sum by (endpoint) (rate(cache_operations_total[1h])))
+```
+
+**Cache Performance Analysis:**
+
+```promql
+# Endpoints with lowest hit ratios
+bottomk(5, cache_hit_ratio)
+
+# Hit rate by endpoint
+rate(cache_hits_total[5m]) by (endpoint)
+
+# Miss rate by endpoint  
+rate(cache_misses_total[5m]) by (endpoint)
 ```
 
 **Daily Request Volume:**
 
 ```promql
-sum by (date) (increase(cache_requests_by_time_total[24h]))
+# Using consolidated metrics with time labels
+sum by (date) (increase(cache_operations_total[24h]))
 ```
 
 **Weekly Pattern Analysis:**
 
 ```promql
-sum by (day_of_week) (rate(cache_requests_by_time_total[7d]))
+# Using consolidated metrics with time labels
+sum by (day_of_week) (rate(cache_operations_total[7d]))
 ```
 
 **Current Cache Size (Real-time):**
@@ -1087,14 +1195,26 @@ histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m]))
 **Top 20 Most Active Endpoints (24h):**
 
 ```promql
-topk(20, sum by (endpoint) (rate(cache_requests_by_time_total[24h])))
+# Using dedicated hit metrics
+topk(20, sum by (endpoint) (rate(cache_hits_total[24h])))
+
+# Using consolidated metrics  
+topk(20, sum by (endpoint) (rate(cache_operations_total[24h])))
 ```
 
 **Cache Efficiency by Endpoint:**
 
 ```promql
+# Real-time efficiency (gauge)
+cache_hit_ratio
+
+# Calculated efficiency (simple metrics)
 sum by (endpoint) (rate(cache_hits_total[5m])) /
 sum by (endpoint) (rate(cache_hits_total[5m]) + rate(cache_misses_total[5m])) * 100
+
+# Calculated efficiency (consolidated metrics)
+sum by (endpoint) (rate(cache_operations_total{operation="hit"}[5m])) /
+sum by (endpoint) (rate(cache_operations_total[5m])) * 100
 ```
 
 ### Precache Queries
