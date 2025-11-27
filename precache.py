@@ -895,6 +895,7 @@ async def compare_and_update_cache(fresh_data_result, cache_manager, run_id, sta
     """
     redis_client = None
     changes_detected = {}
+    changed_season_ids = set()
     changed_tournament_ids = set()
     changed_team_ids = []
     changed_match_ids = set()
@@ -948,16 +949,18 @@ async def compare_and_update_cache(fresh_data_result, cache_manager, run_id, sta
         # Load cached data
         cached_valid_seasons = await _get_cached("valid_seasons")
         cached_tournaments = await _get_cached("tournaments_in_season")
+        cached_root_tournaments = await _get_cached("root_tournaments")
         cached_tournament_matches = await _get_cached("tournament_matches")
         cached_team_ids = await _get_cached("unique_team_ids") or []
         
         # Log cached data to debug files
         _log_cache_data_to_file("valid_seasons", cached_valid_seasons, run_id)
         _log_cache_data_to_file("tournaments_in_season", cached_tournaments, run_id)
+        _log_cache_data_to_file("root_tournaments", cached_root_tournaments, run_id)
         _log_cache_data_to_file("tournament_matches", cached_tournament_matches, run_id)
         _log_cache_data_to_file("unique_team_ids", cached_team_ids, run_id)
         
-        logger.info(f"Run {run_id}: Loaded cached data - {len(cached_valid_seasons or [])} seasons, {len(cached_tournaments or [])} tournaments, {len(cached_tournament_matches or [])} matches, {len(cached_team_ids)} team IDs")
+        logger.info(f"Run {run_id}: Loaded cached data - {len(cached_valid_seasons or [])} seasons, {len(cached_tournaments or [])} tournaments, {len(cached_root_tournaments or [])} root tournaments, {len(cached_tournament_matches or [])} matches, {len(cached_team_ids)} team IDs")
         
         # Log newly fetched data to debug files
         _log_cache_data_to_file("valid_seasons_fetched", valid_seasons, run_id)
@@ -1000,8 +1003,15 @@ async def compare_and_update_cache(fresh_data_result, cache_manager, run_id, sta
                     ensure_ascii=False,
                 ),
             )
-            _record_changes("valid_seasons", len(valid_seasons))
+            
+            # Calculate which seasons changed
+            cached_season_ids = {s["seasonId"] for s in (cached_valid_seasons or []) if "seasonId" in s}
+            new_season_ids = {s["seasonId"] for s in valid_seasons if "seasonId" in s}
+            changed_season_ids = new_season_ids.symmetric_difference(cached_season_ids)
+            
+            _record_changes("valid_seasons", len(changed_season_ids))
             logger.info(f"Valid seasons cache updated with {len(valid_seasons)} seasons (was {len(cached_valid_seasons or [])} seasons)")
+            logger.info(f"Season changes detected: {len(changed_season_ids)} seasons changed")
             
             # Verify the data was stored
             verification = await redis_client.get("valid_seasons")
@@ -1017,6 +1027,7 @@ async def compare_and_update_cache(fresh_data_result, cache_manager, run_id, sta
             else:
                 logger.error("VERIFICATION FAILED: No data found in Redis after attempted storage")
         else:
+            changed_season_ids = set()  # Ensure changed_season_ids is empty when no changes
             logger.debug(f"No valid seasons changes detected - cache has {len(cached_valid_seasons or [])} seasons, fetched {len(valid_seasons)}")
             await _update_valid_seasons_metrics(redis_client)
         
@@ -1060,6 +1071,37 @@ async def compare_and_update_cache(fresh_data_result, cache_manager, run_id, sta
             logger.debug(f"No tournament changes detected - cache has {len(cached_tournaments or [])} tournaments, fetched {len(tournaments)}")
             await _update_tournaments_in_season_metrics(redis_client)
             await _update_tournament_matches_metrics(redis_client)
+        
+        # -----------------------------------------------------------------
+        # Compare and update root tournaments
+        root_tournaments_changed = json.dumps(root_tournaments, sort_keys=True) != json.dumps(cached_root_tournaments or [], sort_keys=True)
+        
+        logger.info(f"Run {run_id}: Data comparison - fetched {len(root_tournaments)} root tournaments, cached {len(cached_root_tournaments or [])} root tournaments")
+        logger.info(f"Run {run_id}: Root tournaments changed: {root_tournaments_changed}")
+        
+        changed_root_tournament_ids = set()
+        if root_tournaments_changed:
+            await redis_client.set(
+                "root_tournaments",
+                json.dumps(
+                    {"data": root_tournaments, "last_updated": start_time.isoformat()},
+                    ensure_ascii=False,
+                ),
+            )
+            
+            # Calculate which root tournaments changed
+            cached_root_ids = {t["tournamentId"] for t in (cached_root_tournaments or []) if "tournamentId" in t}
+            new_root_ids = {t["tournamentId"] for t in root_tournaments if "tournamentId" in t}
+            changed_root_tournament_ids = new_root_ids.symmetric_difference(cached_root_ids)
+            
+            _record_changes("root_tournaments", len(changed_root_tournament_ids))
+            logger.info(f"Root tournament changes detected: {len(changed_root_tournament_ids)} root tournaments changed")
+            logger.info(f"Updated root_tournaments cache with {len(root_tournaments)} root tournaments")
+        else:
+            logger.debug(f"No root tournament changes detected - cache has {len(cached_root_tournaments or [])} root tournaments, fetched {len(root_tournaments)}")
+        
+        if changed_root_tournament_ids:
+            logger.info(f"Run {run_id}: Detected changes in {len(changed_root_tournament_ids)} root_tournaments")
         
         # -----------------------------------------------------------------
         # Compare and update matches
@@ -1140,7 +1182,7 @@ async def compare_and_update_cache(fresh_data_result, cache_manager, run_id, sta
         await _update_tournament_matches_metrics(redis_client)
         
         # Ensure all categories are recorded (even with 0 changes) for consistent time-series data
-        all_categories = ["valid_seasons", "tournaments_in_season", "tournament_matches", "individual_matches", "unique_team_ids"]
+        all_categories = ["valid_seasons", "tournaments_in_season", "root_tournaments", "tournament_matches", "individual_matches", "unique_team_ids"]
         for category in all_categories:
             if category not in changes_detected:
                 PRECACHE_CHANGES_THIS_RUN.labels(category=category, run_id=run_id).set(0)
@@ -1154,7 +1196,9 @@ async def compare_and_update_cache(fresh_data_result, cache_manager, run_id, sta
         
         return {
             "changes_detected": changes_detected,
+            "changed_season_ids": changed_season_ids,
             "changed_tournament_ids": changed_tournament_ids,
+            "changed_root_tournament_ids": changed_root_tournament_ids,
             "changed_team_ids": changed_team_ids,
             "changed_match_ids": changed_match_ids,
             "api_calls": api_calls,
@@ -1191,10 +1235,19 @@ async def process_match_cache_batch(match_batch, match_endpoint_configs, cache_m
                         cache_key = f"GET:{path}?{endpoint_config['param_key']}={match_id}"
                         params = {endpoint_config["param_key"]: match_id}
                     
-                    await cache_manager.setup_refresh(
-                        cache_key, target_url, ttl, refresh_until, params=params
-                    )
-                    logger.debug(f"Added cache refresh for changed match {match_id}: {cache_key}")
+                    if refresh_until is not False:
+                        # Use setup_refresh for auto-refresh functionality
+                        await cache_manager.setup_refresh(
+                            cache_key, target_url, ttl, refresh_until, params=params
+                        )
+                        logger.debug(f"Set up auto-refresh cache for match {match_id}: {cache_key}")
+                    else:
+                        # Fetch and cache data directly without auto-refresh
+                        success = await cache_manager.fetch_and_cache(cache_key, target_url, ttl, params)
+                        if success:
+                            logger.debug(f"Created TTL-only cache entry for match {match_id}: {cache_key}")
+                        else:
+                            logger.warning(f"Failed to create cache entry for match {match_id}: {cache_key}")
                     
                     # Small delay between cache setups to prevent overwhelming Redis
                     await asyncio.sleep(CACHE_SETUP_DELAY)
@@ -1204,6 +1257,43 @@ async def process_match_cache_batch(match_batch, match_endpoint_configs, cache_m
     
     # Process all matches in this batch concurrently but with limited concurrency
     tasks = [setup_match_cache(match_id) for match_id in match_batch]
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def process_root_tournament_cache_batch(root_tournament_batch, cache_manager, ttl, refresh_until, run_id):
+    """Process a batch of root tournaments for cache warming with rate limiting"""
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_CACHE_SETUPS)
+    
+    async def setup_root_tournament_cache(root_tournament_id):
+        async with semaphore:
+            try:
+                # Construct URL and cache key for root tournament hierarchy endpoint
+                path = f"api/v1/ta/tournament/season/{root_tournament_id}/"
+                target_url = f"{config.API_URL}/{path}"
+                cache_key = f"GET:{path}?hierarchy=true"
+                
+                if refresh_until is not False:
+                    # Use setup_refresh for auto-refresh functionality
+                    await cache_manager.setup_refresh(
+                        cache_key, target_url, ttl, refresh_until, params={"hierarchy": "true"}
+                    )
+                    logger.debug(f"Set up auto-refresh cache for root tournament {root_tournament_id}: {cache_key}")
+                else:
+                    # Fetch and cache data directly without auto-refresh
+                    success = await cache_manager.fetch_and_cache(cache_key, target_url, ttl, {"hierarchy": "true"})
+                    if success:
+                        logger.debug(f"Created TTL-only cache entry for root tournament {root_tournament_id}: {cache_key}")
+                    else:
+                        logger.warning(f"Failed to create cache entry for root tournament {root_tournament_id}: {cache_key}")
+                
+                # Small delay between cache setups to prevent overwhelming Redis
+                await asyncio.sleep(CACHE_SETUP_DELAY)
+                
+            except Exception as e:
+                logger.error(f"Error setting up cache for root tournament {root_tournament_id}: {e}")
+    
+    # Process all root tournaments in this batch concurrently but with limited concurrency
+    tasks = [setup_root_tournament_cache(root_tournament_id) for root_tournament_id in root_tournament_batch]
     await asyncio.gather(*tasks, return_exceptions=True)
 
 
@@ -1220,10 +1310,19 @@ async def process_team_cache_batch(team_batch, cache_manager, ttl, refresh_until
                 target_url = f"{config.API_URL}/{path}"
                 # Cache key format: GET:path?params (matching main.py line 642)
                 cache_key = f"GET:{path}?orgId={team_id}"
-                await cache_manager.setup_refresh(
-                    cache_key, target_url, ttl, refresh_until, params={"orgId": team_id}
-                )
-                logger.debug(f"Added cache refresh for changed team: {team_id} with cache_key: {cache_key}")
+                if refresh_until is not False:
+                    # Use setup_refresh for auto-refresh functionality
+                    await cache_manager.setup_refresh(
+                        cache_key, target_url, ttl, refresh_until, params={"orgId": team_id}
+                    )
+                    logger.debug(f"Set up auto-refresh cache for team {team_id} with cache_key: {cache_key}")
+                else:
+                    # Fetch and cache data directly without auto-refresh
+                    success = await cache_manager.fetch_and_cache(cache_key, target_url, ttl, {"orgId": team_id})
+                    if success:
+                        logger.debug(f"Created TTL-only cache entry for team {team_id}: {cache_key}")
+                    else:
+                        logger.warning(f"Failed to create cache entry for team {team_id}: {cache_key}")
                 
                 # Small delay between cache setups to prevent overwhelming Redis
                 await asyncio.sleep(CACHE_SETUP_DELAY)
@@ -1269,7 +1368,9 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
             run_timestamp = start_time.isoformat()
             api_calls = {"seasons": 0, "tournament_season": 0, "tournament_matches": 0}
             changes_detected = {}
+            changed_season_ids = set()
             changed_tournament_ids = set()
+            changed_root_tournament_ids = set()
             changed_team_ids = []
             changed_match_ids = set()
             upstream_status = "UP"
@@ -1315,7 +1416,9 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                     )
                     
                     changes_detected = comparison_result["changes_detected"]
+                    changed_season_ids = comparison_result["changed_season_ids"]
                     changed_tournament_ids = comparison_result["changed_tournament_ids"]
+                    changed_root_tournament_ids = comparison_result["changed_root_tournament_ids"]
                     changed_team_ids = comparison_result["changed_team_ids"]
                     changed_match_ids = comparison_result["changed_match_ids"]
                     upstream_status = comparison_result["upstream_status"]
@@ -1328,7 +1431,7 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                     # api/v1/ta/matchreferee?matchId=
                     # api/v1/ta/matchteammembers/8224291/?images=false
                     # api/v1/ta/tournament/?tournamentId=440904
-                    # api/v1/ta/tournament/season/201065/?hierarchy=true
+                    
                     # api/v1/ta/venue/?venueId=10143
                     # api/v1/ta/venueunit/?venueUnitId=33866
 
@@ -1341,7 +1444,7 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                     logger.info(f"Run {run_id}: Step 3 - Warming caches for changed items")
                     
                     # Set cache warming flag to prevent other iterations from running
-                    cache_warming_needed = bool(changed_tournament_ids or changed_team_ids or changed_match_ids)
+                    cache_warming_needed = bool(changed_season_ids or changed_tournament_ids or changed_root_tournament_ids or changed_team_ids or changed_match_ids)
                     
                     if cache_warming_needed:
                         CACHE_WARMING_IN_PROGRESS = True
@@ -1349,11 +1452,50 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                     
                     try:
                         # Define cache warming parameters
-                        refresh_until = pendulum.now().add(days=7)
-                        ttl = 7 * 24 * 60 * 60
+                        ttl = 7 * 24 * 60 * 60  # 7 days in seconds
+                        refresh_until = False  # TTL-only, no auto-refresh
+
+
+                        if changed_season_ids:
+                            logger.info(f"Run {run_id}: Detected changes in {len(changed_season_ids)} seasons")
+                            
+                            #api/v1/ta/tournament/season/201065/?hierarchy=true
+                         
+                            for season_id in changed_season_ids:
+                                path = f"api/v1/ta/tournament/season/{season_id}/"
+                                target_url = f"{config.API_URL}/{path}"
+                                cache_key = f"GET:{path}?hierarchy=true"
+                                
+                                success = await cache_manager.fetch_and_cache(cache_key, target_url, ttl, {"hierarchy": "true"})
+                                if success:
+                                    logger.debug(f"Created TTL-only cache entry for season {season_id}: {cache_key}")
+                                else:
+                                    logger.warning(f"Failed to create cache entry for season {season_id}: {cache_key}")
+
+
+                        if changed_root_tournament_ids:
+                            logger.info(f"Run {run_id}: Detected changes in {len(changed_root_tournament_ids)} root tournaments")
+                        
 
                         if changed_tournament_ids:
                             logger.info(f"Run {run_id}: Detected changes in {len(changed_tournament_ids)} tournaments")
+                            for tournament_id in changed_tournament_ids:
+                                path = f"api/v1/ta/tournament/"
+                                target_url = f"{config.API_URL}/{path}"
+                                cache_key = f"GET:{path}?tournamentId={tournament_id}"
+                                if refresh_until is not False:
+                                    # Use setup_refresh for auto-refresh functionality
+                                    await cache_manager.setup_refresh(
+                                        cache_key, target_url, ttl, refresh_until, params={"tournamentId": tournament_id}
+                                    )
+                                    logger.debug(f"Set up auto-refresh cache for tournament {tournament_id}: {cache_key}")
+                                else:
+                                    # Fetch and cache data directly without auto-refresh
+                                    success = await cache_manager.fetch_and_cache(cache_key, target_url, ttl, {"tournamentId": tournament_id})
+                                    if success:
+                                        logger.debug(f"Created TTL-only cache entry for tournament {tournament_id}: {cache_key}")
+                                    else:
+                                        logger.warning(f"Failed to create cache entry for tournament {tournament_id}: {cache_key}")
 
                         if changed_team_ids:
                             logger.info(f"Run {run_id}: Detected changes in {len(changed_team_ids)} teams")
@@ -1387,11 +1529,11 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                             # Set up cache entries for match-related endpoints
                             match_endpoint_configs = [
                                 {"path": "api/v1/ta/match/", "param_key": "matchId", "path_param": False},
-                                {"path": "api/v1/ta/matchincidents/", "param_key": "matchId", "path_param": False},
-                                {"path": "api/v1/ta/matchreferee", "param_key": "matchId", "path_param": False},
-                                {"path": "api/v1/ta/matchteammembers/{match_id}/", "param_key": "images", "param_value": "false", "path_param": True},
-                                {"path": "api/v1/ta/venue/", "param_key": "venueId", "path_param": False},
-                                {"path": "api/v1/ta/venueunit/", "param_key": "venueId", "path_param": False}
+                                # {"path": "api/v1/ta/matchincidents/", "param_key": "matchId", "path_param": False},
+                                # {"path": "api/v1/ta/matchreferee", "param_key": "matchId", "path_param": False},
+                                # {"path": "api/v1/ta/matchteammembers/{match_id}/", "param_key": "images", "param_value": "false", "path_param": True},
+                                # {"path": "api/v1/ta/venue/", "param_key": "venueId", "path_param": False},
+                                # {"path": "api/v1/ta/venueunit/", "param_key": "venueId", "path_param": False}
                             ]
                             
                             # Process matches in batches to prevent overwhelming the system
@@ -1504,7 +1646,7 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                 PRECACHE_RUNS_TOTAL.labels(status="error").inc()
                 
                 # Record error metrics with zero changes for this run to maintain time-series continuity
-                all_categories = ["valid_seasons", "tournaments_in_season", "tournament_matches", "individual_matches", "unique_team_ids"]
+                all_categories = ["valid_seasons", "tournaments_in_season", "root_tournaments", "tournament_matches", "individual_matches", "unique_team_ids"]
                 for category in all_categories:
                     PRECACHE_CHANGES_THIS_RUN.labels(category=category, run_id=run_id).set(-1)  # -1 indicates error
                     PRECACHE_RUN_CHANGES_SUMMARY.labels(

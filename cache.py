@@ -343,6 +343,42 @@ class CacheManager:
 
         return False
 
+    async def fetch_and_cache(self, cache_key, target_url, ttl, params=None):
+        """Fetch data from URL and cache it with TTL (without setting up auto-refresh)"""
+        client = None
+        try:
+            # Get authentication token
+            token = await self.token_manager.get_token()
+            headers = {"Authorization": f"Bearer {token['access_token']}"}
+
+            kwargs = {"headers": headers}
+            if params:
+                kwargs["params"] = params
+
+            # Make HTTP request
+            client = get_http_client()
+            response = await client.get(target_url, **kwargs)
+
+            if 200 <= response.status_code < 300:
+                # Cache the response with TTL only
+                success = await self.cache_response(cache_key, response, ttl)
+                if success:
+                    logger.debug(f"Successfully cached data for {cache_key}")
+                    return True
+                else:
+                    logger.warning(f"Failed to cache response for {cache_key}")
+                    return False
+            else:
+                logger.error(f"Failed to fetch data for {cache_key}: HTTP {response.status_code}")
+                return False
+
+        except Exception as e:
+            logger.error(f"Error fetching and caching data for {cache_key}: {e}")
+            return False
+        finally:
+            if client:
+                await client.aclose()
+
     async def refresh_cache_task(
         self, url, ttl, refresh_until_date, params=None, cache_key=None
     ):
