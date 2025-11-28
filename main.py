@@ -523,6 +523,99 @@ async def trigger_refresh():
 
 
 @app.get(
+    "/direct/{path:path}",
+    summary="Direct proxy to external API (no cache)",
+    description="Forward requests directly to the external API without any caching",
+    tags=["Proxy"],
+)
+async def direct_proxy(request: Request, path: str):
+    """Forward requests directly to the external API without caching"""
+    logger.info(f"Direct request for {path}")
+
+    # Process path and parameters
+    path = unquote(path.lower())
+    params = dict(request.query_params) or {}
+
+    # Handle path with embedded query params
+    url_params = None
+    paths = path.split("?")
+    if len(paths) > 1:
+        path, url_params = paths
+    else:
+        path = paths[0]
+
+    # Merge URL params with query params
+    if url_params:
+        try:
+            params.update(
+                {k: v for k, v in [param.split("=") for param in url_params.split("&")]}
+            )
+        except ValueError:
+            logger.warning(f"Invalid URL parameters: {url_params}")
+
+    # Clean the path and build target URL
+    path = path.replace("//", "/")
+    target_url = f"{config.API_URL}/{path}"
+    base_endpoint, has_id = extract_base_endpoint(path)
+
+    logger.info(f"Direct request to: {target_url}")
+
+    # Update request metrics
+    REQUEST_COUNT.labels(
+        method=request.method, endpoint=f"direct:{base_endpoint}", has_id=str(has_id)
+    ).inc()
+
+    with REQUEST_LATENCY.labels(method=request.method, endpoint=f"direct:{base_endpoint}").time():
+        try:
+            token = await token_manager.get_token()
+            headers = dict(request.headers)
+            headers["Authorization"] = f"Bearer {token['access_token']}"
+            method = request.method.lower()
+            request_kwargs = {
+                "url": target_url,
+                "headers": {
+                    k: v
+                    for k, v in headers.items()
+                    if k.lower() not in ["host", "connection"]
+                },
+            }
+
+            # Add body for POST/PUT requests
+            if method in ["post", "put"]:
+                body = await request.body()
+                request_kwargs["content"] = body
+
+            # Forward query parameters
+            if params:
+                request_kwargs["params"] = params
+
+            # Make the direct request to external API (no caching)
+            client = get_http_client()
+            response = await getattr(client, method)(**request_kwargs)
+            await client.aclose()
+
+            # Create response headers, removing content-encoding
+            response_headers = dict(response.headers)
+            if "content-encoding" in response_headers:
+                del response_headers["content-encoding"]
+
+            # Return the response from the external API with direct indicator
+            return Response(
+                content=response.content,
+                status_code=response.status_code,
+                headers={**response_headers, "X-Cache": "DIRECT"},
+            )
+        except Exception as e:
+            logger.error(f"Error in direct proxy request to {target_url}: {e}")
+            logger.exception(e)
+            return Response(
+                content=json.dumps({"error": str(e)}),
+                status_code=500,
+                media_type="application/json",
+            )
+
+
+@app.get(
     "/{path:path}",
     summary="Proxy requests to external API",
     description="Forward requests to the external API as they are, by processing querystring to extract caching instructions",

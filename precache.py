@@ -779,11 +779,6 @@ async def pre_cache_getter(token_manager, run_id=None):
                         
                         raw = resp.json()
                         
-                        # Debug: Log the actual response structure
-                        # if raw:
-                        #     logger.debug(f"Run {run_id}: Tournament {tournament_id} API response keys: {list(raw.keys())}")
-                        #     logger.debug(f"Run {run_id}: Tournament {tournament_id} full response: {json.dumps(raw, indent=2)[:500]}")
-                        
                         data = raw.get("matches", [])  # Corrected: API returns "matches", not "tournamentMatches"
                         
                         if isinstance(data, dict):
@@ -841,6 +836,10 @@ async def pre_cache_getter(token_manager, run_id=None):
                 "unique_team_ids": team_ids_list
             }
         }
+
+        # fetch teams from root tournaments - as with match
+        
+
         
         logger.info(f"Run {run_id}: PRE CACHE GETTER completed successfully - fetched fresh data for {len(valid_seasons)} seasons, {len(tournaments)} tournaments, {len(matches)} matches, {len(team_ids_list)} teams")
         
@@ -1431,7 +1430,9 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                     # api/v1/ta/matchreferee?matchId=
                     # api/v1/ta/matchteammembers/8224291/?images=false
                     # api/v1/ta/tournament/?tournamentId=440904
-                    
+                    # api/v1/ta/tournament/season/201065/?hierarchy=true
+                    # api/v1/org/clubsbysport/72/ 151
+                    # api/v1/venues/allvenues
                     # api/v1/ta/venue/?venueId=10143
                     # api/v1/ta/venueunit/?venueUnitId=33866
 
@@ -1456,101 +1457,101 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                         refresh_until = False  # TTL-only, no auto-refresh
 
 
-                        if changed_season_ids:
-                            logger.info(f"Run {run_id}: Detected changes in {len(changed_season_ids)} seasons")
+                        # if changed_season_ids:
+                        #     logger.info(f"Run {run_id}: Detected changes in {len(changed_season_ids)} seasons")
                             
-                            #api/v1/ta/tournament/season/201065/?hierarchy=true
+                        #     # api/v1/ta/tournament/season/201065/?hierarchy=true
                          
-                            for season_id in changed_season_ids:
-                                path = f"api/v1/ta/tournament/season/{season_id}/"
-                                target_url = f"{config.API_URL}/{path}"
-                                cache_key = f"GET:{path}?hierarchy=true"
+                        #     for season_id in changed_season_ids:
+                        #         path = f"api/v1/ta/tournament/season/{season_id}/"
+                        #         target_url = f"{config.API_URL}/{path}"
+                        #         cache_key = f"GET:{path}?hierarchy=true"
                                 
-                                success = await cache_manager.fetch_and_cache(cache_key, target_url, ttl, {"hierarchy": "true"})
-                                if success:
-                                    logger.debug(f"Created TTL-only cache entry for season {season_id}: {cache_key}")
-                                else:
-                                    logger.warning(f"Failed to create cache entry for season {season_id}: {cache_key}")
+                        #         success = await cache_manager.fetch_and_cache(cache_key, target_url, ttl, {"hierarchy": "true"})
+                        #         if success:
+                        #             logger.debug(f"Created TTL-only cache entry for season {season_id}: {cache_key}")
+                        #         else:
+                        #             logger.warning(f"Failed to create cache entry for season {season_id}: {cache_key}")
 
 
-                        if changed_root_tournament_ids:
-                            logger.info(f"Run {run_id}: Detected changes in {len(changed_root_tournament_ids)} root tournaments")
+                        # if changed_root_tournament_ids:
+                        #     logger.info(f"Run {run_id}: Detected changes in {len(changed_root_tournament_ids)} root tournaments")
                         
 
-                        if changed_tournament_ids:
-                            logger.info(f"Run {run_id}: Detected changes in {len(changed_tournament_ids)} tournaments")
-                            for tournament_id in changed_tournament_ids:
-                                path = f"api/v1/ta/tournament/"
-                                target_url = f"{config.API_URL}/{path}"
-                                cache_key = f"GET:{path}?tournamentId={tournament_id}"
-                                if refresh_until is not False:
-                                    # Use setup_refresh for auto-refresh functionality
-                                    await cache_manager.setup_refresh(
-                                        cache_key, target_url, ttl, refresh_until, params={"tournamentId": tournament_id}
-                                    )
-                                    logger.debug(f"Set up auto-refresh cache for tournament {tournament_id}: {cache_key}")
-                                else:
-                                    # Fetch and cache data directly without auto-refresh
-                                    success = await cache_manager.fetch_and_cache(cache_key, target_url, ttl, {"tournamentId": tournament_id})
-                                    if success:
-                                        logger.debug(f"Created TTL-only cache entry for tournament {tournament_id}: {cache_key}")
-                                    else:
-                                        logger.warning(f"Failed to create cache entry for tournament {tournament_id}: {cache_key}")
+                        # if changed_tournament_ids:
+                        #     logger.info(f"Run {run_id}: Detected changes in {len(changed_tournament_ids)} tournaments")
+                        #     for tournament_id in changed_tournament_ids:
+                        #         path = f"api/v1/ta/tournament/"
+                        #         target_url = f"{config.API_URL}/{path}"
+                        #         cache_key = f"GET:{path}?tournamentId={tournament_id}"
+                        #         if refresh_until is not False:
+                        #             # Use setup_refresh for auto-refresh functionality
+                        #             await cache_manager.setup_refresh(
+                        #                 cache_key, target_url, ttl, refresh_until, params={"tournamentId": tournament_id}
+                        #             )
+                        #             logger.debug(f"Set up auto-refresh cache for tournament {tournament_id}: {cache_key}")
+                        #         else:
+                        #             # Fetch and cache data directly without auto-refresh
+                        #             success = await cache_manager.fetch_and_cache(cache_key, target_url, ttl, {"tournamentId": tournament_id})
+                        #             if success:
+                        #                 logger.debug(f"Created TTL-only cache entry for tournament {tournament_id}: {cache_key}")
+                        #             else:
+                        #                 logger.warning(f"Failed to create cache entry for tournament {tournament_id}: {cache_key}")
 
-                        if changed_team_ids:
-                            logger.info(f"Run {run_id}: Detected changes in {len(changed_team_ids)} teams")
+                        # if changed_team_ids:
+                        #     logger.info(f"Run {run_id}: Detected changes in {len(changed_team_ids)} teams")
                             
-                            # Process teams in batches to prevent overwhelming the system
-                            team_ids_list = list(changed_team_ids)
-                            for batch_start in range(0, len(team_ids_list), BATCH_SIZE):
-                                batch_end = min(batch_start + BATCH_SIZE, len(team_ids_list))
-                                team_batch = team_ids_list[batch_start:batch_end]
+                        #     # Process teams in batches to prevent overwhelming the system
+                        #     team_ids_list = list(changed_team_ids)
+                        #     for batch_start in range(0, len(team_ids_list), BATCH_SIZE):
+                        #         batch_end = min(batch_start + BATCH_SIZE, len(team_ids_list))
+                        #         team_batch = team_ids_list[batch_start:batch_end]
                                 
-                                logger.info(f"Run {run_id}: Processing team batch {batch_start//BATCH_SIZE + 1}/{(len(team_ids_list) + BATCH_SIZE - 1)//BATCH_SIZE} ({len(team_batch)} teams)")
+                        #         logger.info(f"Run {run_id}: Processing team batch {batch_start//BATCH_SIZE + 1}/{(len(team_ids_list) + BATCH_SIZE - 1)//BATCH_SIZE} ({len(team_batch)} teams)")
                                 
-                                # Process this batch of teams
-                                await process_team_cache_batch(team_batch, cache_manager, ttl, refresh_until, run_id)
+                        #         # Process this batch of teams
+                        #         await process_team_cache_batch(team_batch, cache_manager, ttl, refresh_until, run_id)
                                 
-                                # Delay between batches to prevent overwhelming the system
-                                if batch_end < len(team_ids_list):
-                                    logger.debug(f"Run {run_id}: Waiting {BATCH_DELAY}s before next batch")
-                                    await asyncio.sleep(BATCH_DELAY)
+                        #         # Delay between batches to prevent overwhelming the system
+                        #         if batch_end < len(team_ids_list):
+                        #             logger.debug(f"Run {run_id}: Waiting {BATCH_DELAY}s before next batch")
+                        #             await asyncio.sleep(BATCH_DELAY)
 
-                        if changed_match_ids:
-                            # Limit the number of matches to cache to prevent system overload
-                            if len(changed_match_ids) > MAX_MATCHES_TO_CACHE:
-                                logger.warning(f"Run {run_id}: Too many changed matches ({len(changed_match_ids)}), limiting to {MAX_MATCHES_TO_CACHE} most recent ones")
-                                changed_match_ids = set(list(changed_match_ids)[:MAX_MATCHES_TO_CACHE])
+                        # if changed_match_ids:
+                        #     # Limit the number of matches to cache to prevent system overload
+                        #     if len(changed_match_ids) > MAX_MATCHES_TO_CACHE:
+                        #         logger.warning(f"Run {run_id}: Too many changed matches ({len(changed_match_ids)}), limiting to {MAX_MATCHES_TO_CACHE} most recent ones")
+                        #         changed_match_ids = set(list(changed_match_ids)[:MAX_MATCHES_TO_CACHE])
                             
-                            logger.info(f"Run {run_id}: Detected changes in {len(changed_match_ids)} matches")
-                            total_cache_entries = len(changed_match_ids) * 4  # 4 endpoints per match
-                            logger.info(f"Run {run_id}: Will create {total_cache_entries} cache entries in batches")
+                        #     logger.info(f"Run {run_id}: Detected changes in {len(changed_match_ids)} matches")
+                        #     total_cache_entries = len(changed_match_ids) * 4  # 4 endpoints per match
+                        #     logger.info(f"Run {run_id}: Will create {total_cache_entries} cache entries in batches")
                             
-                            # Set up cache entries for match-related endpoints
-                            match_endpoint_configs = [
-                                {"path": "api/v1/ta/match/", "param_key": "matchId", "path_param": False},
-                                # {"path": "api/v1/ta/matchincidents/", "param_key": "matchId", "path_param": False},
-                                # {"path": "api/v1/ta/matchreferee", "param_key": "matchId", "path_param": False},
-                                # {"path": "api/v1/ta/matchteammembers/{match_id}/", "param_key": "images", "param_value": "false", "path_param": True},
-                                # {"path": "api/v1/ta/venue/", "param_key": "venueId", "path_param": False},
-                                # {"path": "api/v1/ta/venueunit/", "param_key": "venueId", "path_param": False}
-                            ]
+                        #     # Set up cache entries for match-related endpoints
+                        #     match_endpoint_configs = [
+                        #         {"path": "api/v1/ta/match/", "param_key": "matchId", "path_param": False},
+                        #         # {"path": "api/v1/ta/matchincidents/", "param_key": "matchId", "path_param": False},
+                        #         # {"path": "api/v1/ta/matchreferee", "param_key": "matchId", "path_param": False},
+                        #         # {"path": "api/v1/ta/matchteammembers/{match_id}/", "param_key": "images", "param_value": "false", "path_param": True},
+                        #         # {"path": "api/v1/ta/venue/", "param_key": "venueId", "path_param": False},
+                        #         # {"path": "api/v1/ta/venueunit/", "param_key": "venueId", "path_param": False}
+                        #     ]
                             
-                            # Process matches in batches to prevent overwhelming the system
-                            match_ids_list = list(changed_match_ids)
-                            for batch_start in range(0, len(match_ids_list), BATCH_SIZE):
-                                batch_end = min(batch_start + BATCH_SIZE, len(match_ids_list))
-                                match_batch = match_ids_list[batch_start:batch_end]
+                        #     # Process matches in batches to prevent overwhelming the system
+                        #     match_ids_list = list(changed_match_ids)
+                        #     for batch_start in range(0, len(match_ids_list), BATCH_SIZE):
+                        #         batch_end = min(batch_start + BATCH_SIZE, len(match_ids_list))
+                        #         match_batch = match_ids_list[batch_start:batch_end]
                                 
-                                logger.info(f"Run {run_id}: Processing match batch {batch_start//BATCH_SIZE + 1}/{(len(match_ids_list) + BATCH_SIZE - 1)//BATCH_SIZE} ({len(match_batch)} matches)")
+                        #         logger.info(f"Run {run_id}: Processing match batch {batch_start//BATCH_SIZE + 1}/{(len(match_ids_list) + BATCH_SIZE - 1)//BATCH_SIZE} ({len(match_batch)} matches)")
                                 
-                                # Process this batch of matches
-                                await process_match_cache_batch(match_batch, match_endpoint_configs, cache_manager, ttl, refresh_until, run_id)
+                        #         # Process this batch of matches
+                        #         await process_match_cache_batch(match_batch, match_endpoint_configs, cache_manager, ttl, refresh_until, run_id)
                                 
-                                # Delay between batches to prevent overwhelming the system
-                                if batch_end < len(match_ids_list):
-                                    logger.debug(f"Run {run_id}: Waiting {BATCH_DELAY}s before next batch")
-                                    await asyncio.sleep(BATCH_DELAY)
+                        #         # Delay between batches to prevent overwhelming the system
+                        #         if batch_end < len(match_ids_list):
+                        #             logger.debug(f"Run {run_id}: Waiting {BATCH_DELAY}s before next batch")
+                        #             await asyncio.sleep(BATCH_DELAY)
                         
                         logger.info(f"Run {run_id}: Cache warming setup complete")
                         
