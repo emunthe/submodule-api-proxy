@@ -14,7 +14,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from .cache import CacheManager
 from .config import config
-from .precache import detect_change_tournaments_and_matches, clear_precache_data
+from .precache import precache_orchestrator, clear_precache_data
 from .prometheus import (
     REQUEST_COUNT,
     REQUEST_LATENCY,
@@ -106,7 +106,7 @@ async def startup_event():
     # Only start precache if configured to do so
     if config.PRECACHE_AUTO_START:
         logger.info("PRECACHE_AUTO_START is enabled - starting precache task on startup")
-        precache_task = asyncio.create_task(detect_change_tournaments_and_matches(cache_manager, token_manager))
+        precache_task = asyncio.create_task(precache_orchestrator(cache_manager, token_manager))
         background_tasks.add(precache_task)
         precache_task.add_done_callback(background_tasks.discard)
     else:
@@ -345,8 +345,8 @@ async def start_precache():
         }
     
     # Start a new precache task
-    logger.info(f"Starting new precache task with detect_change_tournaments_and_matches function")
-    precache_task = asyncio.create_task(detect_change_tournaments_and_matches(cache_manager, token_manager))
+    logger.info(f"Starting new precache task with precache_orchestrator function")
+    precache_task = asyncio.create_task(precache_orchestrator(cache_manager, token_manager))
     background_tasks.add(precache_task)
     precache_task.add_done_callback(background_tasks.discard)
     
