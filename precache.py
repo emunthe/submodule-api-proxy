@@ -99,6 +99,45 @@ PRECACHE_VALID_SEASONS_INFO = Gauge(
     ["season_id", "season_name", "season_year", "sport_id", "sport_name"]
 )
 
+# New metrics for different run types
+PRECACHE_RUN_TYPE_COUNTER = Counter(
+    "precache_run_type_total",
+    "Total number of each type of precache run",
+    ["run_type"]  # primary, secondary, tertiary
+)
+
+PRECACHE_RUN_TYPE_DURATION = Histogram(
+    "precache_run_type_duration_seconds",
+    "Duration of each type of precache run",
+    ["run_type"]  # primary, secondary, tertiary
+)
+
+PRECACHE_RUN_TYPE_LAST_SUCCESS = Gauge(
+    "precache_run_type_last_success_timestamp",
+    "Timestamp of last successful run for each type",
+    ["run_type"]  # primary, secondary, tertiary
+)
+
+PRECACHE_SECONDARY_COUNTER = Gauge(
+    "precache_secondary_run_counter",
+    "Counter for secondary runs executed"
+)
+
+PRECACHE_TERTIARY_COUNTER = Gauge(
+    "precache_tertiary_run_counter", 
+    "Counter for tertiary runs executed"
+)
+
+PRECACHE_SECONDARY_COUNTER = Gauge(
+    "precache_secondary_run_counter",
+    "Counter for secondary runs (every 3 primary runs)"
+)
+
+PRECACHE_TERTIARY_COUNTER = Gauge(
+    "precache_tertiary_run_counter", 
+    "Counter for tertiary runs (every 300 primary runs)"
+)
+
 PRECACHE_TOURNAMENTS_IN_SEASON_COUNT = Gauge(
     "precache_tournaments_in_season_count",
     "Total number of tournaments in season currently cached"
@@ -560,18 +599,18 @@ def _group_by_match_id(data):
     return grouped
 
 
-async def pre_cache_getter(token_manager, run_id=None):
-    """PRE CACHE GETTER - Fetches API data without creating cache entries.
+async def pre_cache_getter_primary(token_manager, run_id=None):
+    """PRIMARY RUN PRE CACHE GETTER - Fetches basic API data (seasons, tournaments, matches).
     
-    This function gets fresh data from the external API and returns it as raw data
-    for use in the periodically running function. It does NOT create cache entries.
+    This is the fast primary data fetch that runs every 3 minutes (~30 seconds execution time).
+    Gets essential data: seasons, tournaments, and matches from DATA.NIF.NO.
     
     Args:
         token_manager: Token manager for API authentication
         run_id: Optional run ID for tracking API calls
     
     Returns:
-        dict: Contains fresh data from API including seasons, tournaments, and matches
+        dict: Contains fresh basic data from API including seasons, tournaments, and matches
     """
     if not run_id:
         run_id = str(uuid.uuid4())[:8]
@@ -867,13 +906,405 @@ async def pre_cache_getter(token_manager, run_id=None):
         return result
         
     except Exception as e:
-        logger.error(f"Run {run_id}: PRE CACHE GETTER failed: {e}")
+        logger.error(f"Run {run_id}: PRE CACHE GETTER PRIMARY failed: {e}")
         logger.exception(e)
         raise
         
     finally:
         if client:
             await client.aclose()
+
+
+async def pre_cache_getter_secondary(token_manager, run_id=None):
+    """SECONDARY RUN PRE CACHE GETTER - Fetches additional API data (clubs, teams).
+    
+    This runs every 9 minutes (3 runs) and takes ~5 minutes execution time.
+    Gets clubs and teams data from DATA.NIF.NO.
+    
+    Args:
+        token_manager: Token manager for API authentication
+        run_id: Optional run ID for tracking API calls
+    
+    Returns:
+        dict: Contains fresh clubs and teams data from API
+    """
+    if not run_id:
+        run_id = str(uuid.uuid4())[:8]
+    
+    logger.info(f"Run {run_id}: PRE CACHE GETTER SECONDARY starting - fetching clubs and teams data from API")
+    
+    client = None
+    api_calls = {"clubs": 0, "teams": 0}
+    api_urls_called = []
+    
+    try:
+        # Get authentication token
+        token = await token_manager.get_token()
+        headers = {"Authorization": f"Bearer {token['access_token']}"}
+        client = get_http_client()
+        
+        # Helper function to track API calls
+        def _track_api_call(url, method="GET", params=None, status=None):
+            try:
+                url_path = url.replace(config.API_URL, "") if config.API_URL in url else url
+                params_str = json.dumps(params or {}, sort_keys=True)
+                api_urls_called.append({
+                    "url": url,
+                    "method": method,
+                    "params": params,
+                    "status": status,
+                    "timestamp": pendulum.now().isoformat()
+                })
+            except Exception as e:
+                logger.debug(f"Error tracking API call: {e}")
+        
+        # -----------------------------------------------------------------
+        # Fetch clubs data for relevant sports
+        sport_ids = [72, 151]  # 72=Innebandy, 151=Bandy
+        clubs_data = []
+        
+        logger.info(f"Run {run_id}: PRE CACHE GETTER SECONDARY fetching clubs for sports {sport_ids}")
+        
+        async def fetch_clubs_for_sport(sport_id):
+            try:
+                url = f"{config.API_URL}/api/v1/org/clubsbysport/{sport_id}/"
+                
+                resp = await client.get(url, headers=headers)
+                _track_api_call(url, "GET", None, status=resp.status_code)
+                api_calls["clubs"] += 1
+                
+                if resp.status_code < 400:
+                    try:
+                        raw = resp.json()
+                        data = raw.get("clubs", [])
+                        
+                        if isinstance(data, dict):
+                            return [data]
+                        elif isinstance(data, list):
+                            return data
+                        else:
+                            logger.warning(f"Run {run_id}: Unexpected clubs data type for sport={sport_id}: {type(data).__name__}")
+                            return []
+                    except Exception as e:
+                        logger.warning(f"Run {run_id}: Failed to parse clubs response for sport={sport_id}: {e}")
+                        return []
+                else:
+                    logger.warning(f"Run {run_id}: Failed to fetch clubs for sport={sport_id}: {resp.status_code}")
+                    return []
+            except Exception as e:
+                logger.error(f"Run {run_id}: Error fetching clubs for sport={sport_id}: {e}")
+                return []
+        
+        # Fetch clubs for all sports in parallel
+        clubs_tasks = [fetch_clubs_for_sport(sport_id) for sport_id in sport_ids]
+        clubs_results = await asyncio.gather(*clubs_tasks, return_exceptions=True)
+        
+        for result in clubs_results:
+            if isinstance(result, list):
+                clubs_data.extend(result)
+            elif isinstance(result, Exception):
+                logger.error(f"Run {run_id}: Clubs fetch task failed: {result}")
+        
+        logger.info(f"Run {run_id}: PRE CACHE GETTER SECONDARY found {len(clubs_data)} clubs")
+        
+        # -----------------------------------------------------------------
+        # Get teams data from unique team IDs (if available from previous primary run)
+        teams_data = []
+        redis_client = None
+        
+        try:
+            redis_client = get_redis_client()
+            cached_team_ids_raw = await redis_client.get("unique_team_ids")
+            if cached_team_ids_raw:
+                cached_team_ids_data = json.loads(cached_team_ids_raw)
+                team_ids_list = cached_team_ids_data.get("data", [])
+                
+                logger.info(f"Run {run_id}: PRE CACHE GETTER SECONDARY fetching team data for {len(team_ids_list)} teams")
+                
+                # Limit teams to process to avoid long execution time
+                max_teams = 100  # Limit for secondary run
+                team_ids_to_process = team_ids_list[:max_teams]
+                
+                async def fetch_team_data(team_id):
+                    try:
+                        url = f"{config.API_URL}/api/v1/org/teams"
+                        params = {"orgId": team_id}
+                        
+                        resp = await client.get(url, headers=headers, params=params)
+                        _track_api_call(url, "GET", params, status=resp.status_code)
+                        api_calls["teams"] += 1
+                        
+                        if resp.status_code < 400:
+                            try:
+                                raw = resp.json()
+                                return raw
+                            except Exception as e:
+                                logger.warning(f"Run {run_id}: Failed to parse team response for team={team_id}: {e}")
+                                return None
+                        else:
+                            logger.warning(f"Run {run_id}: Failed to fetch team data for team={team_id}: {resp.status_code}")
+                            return None
+                    except Exception as e:
+                        logger.error(f"Run {run_id}: Error fetching team data for team={team_id}: {e}")
+                        return None
+                
+                # Process teams in smaller batches to avoid overwhelming the API
+                batch_size = 10
+                for i in range(0, len(team_ids_to_process), batch_size):
+                    batch = team_ids_to_process[i:i + batch_size]
+                    team_tasks = [fetch_team_data(team_id) for team_id in batch]
+                    team_results = await asyncio.gather(*team_tasks, return_exceptions=True)
+                    
+                    for result in team_results:
+                        if result and not isinstance(result, Exception):
+                            teams_data.append(result)
+                        elif isinstance(result, Exception):
+                            logger.error(f"Run {run_id}: Team fetch task failed: {result}")
+                    
+                    # Small delay between batches
+                    if i + batch_size < len(team_ids_to_process):
+                        await asyncio.sleep(0.5)
+                
+                logger.info(f"Run {run_id}: PRE CACHE GETTER SECONDARY found {len(teams_data)} teams data")
+            else:
+                logger.info(f"Run {run_id}: No cached team IDs found, skipping team data fetch")
+        except Exception as e:
+            logger.error(f"Run {run_id}: Error fetching team data: {e}")
+        finally:
+            if redis_client:
+                await redis_client.aclose()
+        
+        # Return all fetched data
+        result = {
+            "run_id": run_id,
+            "timestamp": pendulum.now().isoformat(),
+            "api_calls": api_calls,
+            "data": {
+                "clubs": clubs_data,
+                "teams": teams_data
+            }
+        }
+        
+        logger.info(f"Run {run_id}: PRE CACHE GETTER SECONDARY completed successfully - fetched {len(clubs_data)} clubs, {len(teams_data)} teams")
+        
+        # Save API calls to log file
+        try:
+            log_dir = "logs/precache_debug_logs"
+            os.makedirs(log_dir, exist_ok=True)
+            
+            calls_log = {
+                "run_id": run_id,
+                "timestamp": pendulum.now().isoformat(),
+                "total_calls": len(api_urls_called),
+                "calls_by_type": api_calls,
+                "api_calls": api_urls_called
+            }
+            
+            calls_filepath = os.path.join(log_dir, f"precache_secondary_calls_{run_id}.json")
+            with open(calls_filepath, 'w', encoding='utf-8') as f:
+                json.dump(calls_log, f, indent=2, ensure_ascii=False, default=str)
+            
+            logger.info(f"Run {run_id}: Saved {len(api_urls_called)} SECONDARY API calls to {calls_filepath}")
+        except Exception as e:
+            logger.warning(f"Failed to save SECONDARY API calls log: {e}")
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Run {run_id}: PRE CACHE GETTER SECONDARY failed: {e}")
+        logger.exception(e)
+        raise
+        
+    finally:
+        if client:
+            await client.aclose()
+
+
+async def pre_cache_getter_tertiary(token_manager, run_id=None):
+    """TERTIARY RUN PRE CACHE GETTER - Fetches venues and other long-term data.
+    
+    This runs every 15 hours (300 runs) and handles longer execution time.
+    Gets venues data and other less frequently changing data from DATA.NIF.NO.
+    
+    Args:
+        token_manager: Token manager for API authentication
+        run_id: Optional run ID for tracking API calls
+    
+    Returns:
+        dict: Contains fresh venues and other long-term data from API
+    """
+    if not run_id:
+        run_id = str(uuid.uuid4())[:8]
+    
+    logger.info(f"Run {run_id}: PRE CACHE GETTER TERTIARY starting - fetching venues and long-term data from API")
+    
+    client = None
+    api_calls = {"venues": 0, "venue_units": 0}
+    api_urls_called = []
+    
+    try:
+        # Get authentication token
+        token = await token_manager.get_token()
+        headers = {"Authorization": f"Bearer {token['access_token']}"}
+        client = get_http_client()
+        
+        # Helper function to track API calls
+        def _track_api_call(url, method="GET", params=None, status=None):
+            try:
+                url_path = url.replace(config.API_URL, "") if config.API_URL in url else url
+                params_str = json.dumps(params or {}, sort_keys=True)
+                api_urls_called.append({
+                    "url": url,
+                    "method": method,
+                    "params": params,
+                    "status": status,
+                    "timestamp": pendulum.now().isoformat()
+                })
+            except Exception as e:
+                logger.debug(f"Error tracking API call: {e}")
+        
+        # -----------------------------------------------------------------
+        # Fetch all venues data
+        venues_data = []
+        
+        logger.info(f"Run {run_id}: PRE CACHE GETTER TERTIARY fetching all venues")
+        
+        try:
+            url = f"{config.API_URL}/api/v1/venues/allvenues"
+            
+            resp = await client.get(url, headers=headers)
+            _track_api_call(url, "GET", None, status=resp.status_code)
+            api_calls["venues"] += 1
+            
+            if resp.status_code < 400:
+                try:
+                    raw = resp.json()
+                    venues_data = raw.get("venues", [])
+                    
+                    if isinstance(venues_data, dict):
+                        venues_data = [venues_data]
+                    elif not isinstance(venues_data, list):
+                        logger.warning(f"Run {run_id}: Unexpected venues data type: {type(venues_data).__name__}")
+                        venues_data = []
+                        
+                except Exception as e:
+                    logger.warning(f"Run {run_id}: Failed to parse venues response: {e}")
+                    venues_data = []
+            else:
+                logger.warning(f"Run {run_id}: Failed to fetch venues: {resp.status_code}")
+                
+        except Exception as e:
+            logger.error(f"Run {run_id}: Error fetching venues: {e}")
+        
+        logger.info(f"Run {run_id}: PRE CACHE GETTER TERTIARY found {len(venues_data)} venues")
+        
+        # -----------------------------------------------------------------
+        # Fetch detailed venue data for specific venues (if needed)
+        venue_details = []
+        
+        if venues_data:
+            # Limit venue details to process to avoid very long execution
+            max_venues = 50  # Limit for tertiary run
+            venues_to_process = venues_data[:max_venues]
+            
+            logger.info(f"Run {run_id}: PRE CACHE GETTER TERTIARY fetching details for {len(venues_to_process)} venues")
+            
+            async def fetch_venue_detail(venue):
+                try:
+                    venue_id = venue.get("venueId")
+                    if not venue_id:
+                        return None
+                        
+                    url = f"{config.API_URL}/api/v1/ta/venue/"
+                    params = {"venueId": venue_id}
+                    
+                    resp = await client.get(url, headers=headers, params=params)
+                    _track_api_call(url, "GET", params, status=resp.status_code)
+                    api_calls["venue_units"] += 1
+                    
+                    if resp.status_code < 400:
+                        try:
+                            raw = resp.json()
+                            return raw
+                        except Exception as e:
+                            logger.warning(f"Run {run_id}: Failed to parse venue detail response for venue={venue_id}: {e}")
+                            return None
+                    else:
+                        logger.warning(f"Run {run_id}: Failed to fetch venue detail for venue={venue_id}: {resp.status_code}")
+                        return None
+                except Exception as e:
+                    logger.error(f"Run {run_id}: Error fetching venue detail for venue={venue.get('venueId')}: {e}")
+                    return None
+            
+            # Process venues in batches to avoid overwhelming the API
+            batch_size = 5
+            for i in range(0, len(venues_to_process), batch_size):
+                batch = venues_to_process[i:i + batch_size]
+                venue_tasks = [fetch_venue_detail(venue) for venue in batch]
+                venue_results = await asyncio.gather(*venue_tasks, return_exceptions=True)
+                
+                for result in venue_results:
+                    if result and not isinstance(result, Exception):
+                        venue_details.append(result)
+                    elif isinstance(result, Exception):
+                        logger.error(f"Run {run_id}: Venue detail fetch task failed: {result}")
+                
+                # Delay between batches for tertiary run
+                if i + batch_size < len(venues_to_process):
+                    await asyncio.sleep(2.0)  # Longer delay for tertiary
+            
+            logger.info(f"Run {run_id}: PRE CACHE GETTER TERTIARY found {len(venue_details)} venue details")
+        
+        # Return all fetched data
+        result = {
+            "run_id": run_id,
+            "timestamp": pendulum.now().isoformat(),
+            "api_calls": api_calls,
+            "data": {
+                "venues": venues_data,
+                "venue_details": venue_details
+            }
+        }
+        
+        logger.info(f"Run {run_id}: PRE CACHE GETTER TERTIARY completed successfully - fetched {len(venues_data)} venues, {len(venue_details)} venue details")
+        
+        # Save API calls to log file
+        try:
+            log_dir = "logs/precache_debug_logs"
+            os.makedirs(log_dir, exist_ok=True)
+            
+            calls_log = {
+                "run_id": run_id,
+                "timestamp": pendulum.now().isoformat(),
+                "total_calls": len(api_urls_called),
+                "calls_by_type": api_calls,
+                "api_calls": api_urls_called
+            }
+            
+            calls_filepath = os.path.join(log_dir, f"precache_tertiary_calls_{run_id}.json")
+            with open(calls_filepath, 'w', encoding='utf-8') as f:
+                json.dump(calls_log, f, indent=2, ensure_ascii=False, default=str)
+            
+            logger.info(f"Run {run_id}: Saved {len(api_urls_called)} TERTIARY API calls to {calls_filepath}")
+        except Exception as e:
+            logger.warning(f"Failed to save TERTIARY API calls log: {e}")
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Run {run_id}: PRE CACHE GETTER TERTIARY failed: {e}")
+        logger.exception(e)
+        raise
+        
+    finally:
+        if client:
+            await client.aclose()
+
+
+# Keep the original function as an alias to primary for backward compatibility
+async def pre_cache_getter(token_manager, run_id=None):
+    """Legacy function - redirects to pre_cache_getter_primary for backward compatibility."""
+    return await pre_cache_getter_primary(token_manager, run_id)
 
 
 async def compare_and_update_cache(fresh_data_result, cache_manager, run_id, start_time, run_timestamp):
@@ -1334,6 +1765,271 @@ async def process_team_cache_batch(team_batch, cache_manager, ttl, refresh_until
     await asyncio.gather(*tasks, return_exceptions=True)
 
 
+async def compare_and_update_secondary_cache(secondary_data_result, cache_manager, run_id, start_time, run_timestamp):
+    """Compare secondary data (clubs, teams) with cached data and update cache if changes detected.
+    
+    Args:
+        secondary_data_result: Result dict from pre_cache_getter_secondary containing fresh data
+        cache_manager: Cache manager for setting up cache refresh
+        run_id: Run ID for tracking
+        start_time: Start time of the run (pendulum datetime)
+        run_timestamp: ISO format timestamp string
+    
+    Returns:
+        dict: Contains changes detected and upstream status
+    """
+    redis_client = None
+    changes_detected = {}
+    changed_club_ids = set()
+    changed_team_ids = set()
+    upstream_status = "UP"
+    
+    try:
+        redis_client = get_redis_client()
+        
+        # Extract data from secondary_data_result
+        api_calls = secondary_data_result["api_calls"]
+        fresh_data = secondary_data_result["data"]
+        
+        clubs_data = fresh_data["clubs"]
+        teams_data = fresh_data["teams"]
+        
+        logger.info(f"Run {run_id}: COMPARE SECONDARY CACHE starting - comparing fresh secondary data with cached data")
+        
+        # Helper function to record changes
+        def _record_changes(category, count):
+            """Helper function to record changes in metrics"""
+            if count > 0:
+                changes_detected[category] = count
+                PRECACHE_CHANGES_DETECTED.labels(category=category).inc(count)
+                PRECACHE_CHANGES_THIS_RUN.labels(category=category, run_id=run_id).set(count)
+                PRECACHE_RUN_CHANGES_SUMMARY.labels(
+                    run_id=run_id, 
+                    run_timestamp=run_timestamp,
+                    category=category
+                ).set(count)
+                logger.info(f"Run {run_id}: Detected {count} changes in {category}")
+        
+        # Helper function to get cached data
+        async def _get_cached(key):
+            raw = await redis_client.get(key)
+            if not raw:
+                return None
+            try:
+                return json.loads(raw).get("data")
+            except Exception:
+                return None
+        
+        # Load cached secondary data
+        cached_clubs = await _get_cached("clubs_data") or []
+        cached_teams = await _get_cached("teams_data") or []
+        
+        logger.info(f"Run {run_id}: Loaded cached secondary data - {len(cached_clubs)} clubs, {len(cached_teams)} teams")
+        
+        # Compare clubs data
+        clubs_changed = json.dumps(clubs_data, sort_keys=True) != json.dumps(cached_clubs, sort_keys=True)
+        
+        logger.info(f"Run {run_id}: Secondary data comparison - fetched {len(clubs_data)} clubs, cached {len(cached_clubs)} clubs")
+        logger.info(f"Run {run_id}: Clubs data changed: {clubs_changed}")
+        
+        if clubs_changed or (len(clubs_data) > 0 and len(cached_clubs) == 0):
+            await redis_client.set(
+                "clubs_data",
+                json.dumps(
+                    {"data": clubs_data, "last_updated": start_time.isoformat()},
+                    ensure_ascii=False,
+                ),
+            )
+            
+            # Extract club IDs that changed for cache warming
+            if clubs_data:
+                for club in clubs_data:
+                    if isinstance(club, dict) and club.get("clubId"):
+                        changed_club_ids.add(club["clubId"])
+            
+            _record_changes("clubs", len(changed_club_ids))
+            logger.info(f"Run {run_id}: Updated clubs cache with {len(clubs_data)} clubs")
+        
+        # Compare teams data
+        teams_changed = json.dumps(teams_data, sort_keys=True) != json.dumps(cached_teams, sort_keys=True)
+        
+        logger.info(f"Run {run_id}: Secondary data comparison - fetched {len(teams_data)} teams, cached {len(cached_teams)} teams")
+        logger.info(f"Run {run_id}: Teams data changed: {teams_changed}")
+        
+        if teams_changed or (len(teams_data) > 0 and len(cached_teams) == 0):
+            await redis_client.set(
+                "teams_data",
+                json.dumps(
+                    {"data": teams_data, "last_updated": start_time.isoformat()},
+                    ensure_ascii=False,
+                ),
+            )
+            
+            # Extract team IDs that changed for cache warming
+            if teams_data:
+                for team in teams_data:
+                    if isinstance(team, dict) and team.get("organizationId"):
+                        changed_team_ids.add(team["organizationId"])
+            
+            _record_changes("teams", len(changed_team_ids))
+            logger.info(f"Run {run_id}: Updated teams cache with {len(teams_data)} teams")
+        
+        # Update metrics for secondary data
+        PRECACHE_ITEMS_PROCESSED.labels(item_type="clubs").set(len(clubs_data))
+        PRECACHE_ITEMS_PROCESSED.labels(item_type="teams_secondary").set(len(teams_data))
+        
+        return {
+            "changes_detected": changes_detected,
+            "changed_club_ids": changed_club_ids,
+            "changed_team_ids": changed_team_ids,
+            "upstream_status": upstream_status,
+            "api_calls": api_calls
+        }
+        
+    except Exception as e:
+        logger.error(f"Run {run_id}: COMPARE SECONDARY CACHE failed: {e}")
+        logger.exception(e)
+        return {
+            "changes_detected": {},
+            "changed_club_ids": set(),
+            "changed_team_ids": set(),
+            "upstream_status": "DOWN",
+            "api_calls": {}
+        }
+        
+    finally:
+        if redis_client:
+            await redis_client.aclose()
+
+
+async def compare_and_update_tertiary_cache(tertiary_data_result, cache_manager, run_id, start_time, run_timestamp):
+    """Compare tertiary data (venues) with cached data and update cache if changes detected.
+    
+    Args:
+        tertiary_data_result: Result dict from pre_cache_getter_tertiary containing fresh data
+        cache_manager: Cache manager for setting up cache refresh
+        run_id: Run ID for tracking
+        start_time: Start time of the run (pendulum datetime)
+        run_timestamp: ISO format timestamp string
+    
+    Returns:
+        dict: Contains changes detected and upstream status
+    """
+    redis_client = None
+    changes_detected = {}
+    changed_venue_ids = set()
+    upstream_status = "UP"
+    
+    try:
+        redis_client = get_redis_client()
+        
+        # Extract data from tertiary_data_result
+        api_calls = tertiary_data_result["api_calls"]
+        fresh_data = tertiary_data_result["data"]
+        
+        venues_data = fresh_data["venues"]
+        venue_details = fresh_data["venue_details"]
+        
+        logger.info(f"Run {run_id}: COMPARE TERTIARY CACHE starting - comparing fresh tertiary data with cached data")
+        
+        # Helper function to record changes
+        def _record_changes(category, count):
+            """Helper function to record changes in metrics"""
+            if count > 0:
+                changes_detected[category] = count
+                PRECACHE_CHANGES_DETECTED.labels(category=category).inc(count)
+                PRECACHE_CHANGES_THIS_RUN.labels(category=category, run_id=run_id).set(count)
+                PRECACHE_RUN_CHANGES_SUMMARY.labels(
+                    run_id=run_id, 
+                    run_timestamp=run_timestamp,
+                    category=category
+                ).set(count)
+                logger.info(f"Run {run_id}: Detected {count} changes in {category}")
+        
+        # Helper function to get cached data
+        async def _get_cached(key):
+            raw = await redis_client.get(key)
+            if not raw:
+                return None
+            try:
+                return json.loads(raw).get("data")
+            except Exception:
+                return None
+        
+        # Load cached tertiary data
+        cached_venues = await _get_cached("venues_data") or []
+        cached_venue_details = await _get_cached("venue_details") or []
+        
+        logger.info(f"Run {run_id}: Loaded cached tertiary data - {len(cached_venues)} venues, {len(cached_venue_details)} venue details")
+        
+        # Compare venues data
+        venues_changed = json.dumps(venues_data, sort_keys=True) != json.dumps(cached_venues, sort_keys=True)
+        
+        logger.info(f"Run {run_id}: Tertiary data comparison - fetched {len(venues_data)} venues, cached {len(cached_venues)} venues")
+        logger.info(f"Run {run_id}: Venues data changed: {venues_changed}")
+        
+        if venues_changed or (len(venues_data) > 0 and len(cached_venues) == 0):
+            await redis_client.set(
+                "venues_data",
+                json.dumps(
+                    {"data": venues_data, "last_updated": start_time.isoformat()},
+                    ensure_ascii=False,
+                ),
+            )
+            
+            # Extract venue IDs that changed for cache warming
+            if venues_data:
+                for venue in venues_data:
+                    if isinstance(venue, dict) and venue.get("venueId"):
+                        changed_venue_ids.add(venue["venueId"])
+            
+            _record_changes("venues", len(changed_venue_ids))
+            logger.info(f"Run {run_id}: Updated venues cache with {len(venues_data)} venues")
+        
+        # Compare venue details data
+        venue_details_changed = json.dumps(venue_details, sort_keys=True) != json.dumps(cached_venue_details, sort_keys=True)
+        
+        logger.info(f"Run {run_id}: Tertiary data comparison - fetched {len(venue_details)} venue details, cached {len(cached_venue_details)} venue details")
+        logger.info(f"Run {run_id}: Venue details changed: {venue_details_changed}")
+        
+        if venue_details_changed or (len(venue_details) > 0 and len(cached_venue_details) == 0):
+            await redis_client.set(
+                "venue_details",
+                json.dumps(
+                    {"data": venue_details, "last_updated": start_time.isoformat()},
+                    ensure_ascii=False,
+                ),
+            )
+            
+            _record_changes("venue_details", len(venue_details))
+            logger.info(f"Run {run_id}: Updated venue details cache with {len(venue_details)} venue details")
+        
+        # Update metrics for tertiary data
+        PRECACHE_ITEMS_PROCESSED.labels(item_type="venues").set(len(venues_data))
+        PRECACHE_ITEMS_PROCESSED.labels(item_type="venue_details").set(len(venue_details))
+        
+        return {
+            "changes_detected": changes_detected,
+            "changed_venue_ids": changed_venue_ids,
+            "upstream_status": upstream_status,
+            "api_calls": api_calls
+        }
+        
+    except Exception as e:
+        logger.error(f"Run {run_id}: COMPARE TERTIARY CACHE failed: {e}")
+        logger.exception(e)
+        return {
+            "changes_detected": {},
+            "changed_venue_ids": set(),
+            "upstream_status": "DOWN",
+            "api_calls": {}
+        }
+        
+    finally:
+        if redis_client:
+            await redis_client.aclose()
+
+
 async def detect_change_tournaments_and_matches(cache_manager, token_manager):
     """Periodically fetch season, tournament, match and team data.
 
@@ -1349,10 +2045,40 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
         logger.error(f"Error logging function entry: {e}")
     
     loop_iteration = 0
+    secondary_run_counter = 0  # Track runs for SECONDARY execution (every 3 runs)
+    tertiary_run_counter = 0  # Track runs for TERTIARY execution (every 300 runs)
 
     while True:
         try:
             loop_iteration += 1
+            
+            # Determine which type of run to execute based on counters
+            # PRIMARY runs every iteration (every 3 minutes)
+            # SECONDARY runs every 3 iterations (every 9 minutes)
+            # TERTIARY runs every 300 iterations (every 15 hours)
+            
+            run_primary = True  # Always run primary
+            run_secondary = (loop_iteration % 3 == 0)  # Every 3rd iteration
+            run_tertiary = (loop_iteration % 300 == 0)  # Every 300th iteration
+            
+            run_types = []
+            if run_primary:
+                run_types.append("PRIMARY")
+                PRECACHE_RUN_TYPE_COUNTER.labels(run_type="primary").inc()
+            if run_secondary:
+                run_types.append("SECONDARY")
+                secondary_run_counter += 1
+                PRECACHE_RUN_TYPE_COUNTER.labels(run_type="secondary").inc()
+            if run_tertiary:
+                run_types.append("TERTIARY")
+                tertiary_run_counter += 1
+                PRECACHE_RUN_TYPE_COUNTER.labels(run_type="tertiary").inc()
+            
+            # Update counters in metrics
+            PRECACHE_SECONDARY_COUNTER.set(secondary_run_counter)
+            PRECACHE_TERTIARY_COUNTER.set(tertiary_run_counter)
+            
+            logger.info(f"Precache iteration {loop_iteration}: Running {', '.join(run_types)} (Secondary: {secondary_run_counter}, Tertiary: {tertiary_run_counter})")
             
             # Check if cache warming is in progress
             if CACHE_WARMING_IN_PROGRESS:
@@ -1365,7 +2091,7 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
             start_time = pendulum.now()
             run_id = str(uuid.uuid4())[:8]  # Short unique ID for this run
             run_timestamp = start_time.isoformat()
-            api_calls = {"seasons": 0, "tournament_season": 0, "tournament_matches": 0}
+            api_calls = {"seasons": 0, "tournament_season": 0, "tournament_matches": 0, "clubs": 0, "teams": 0, "venues": 0}
             changes_detected = {}
             changed_season_ids = set()
             changed_tournament_ids = set()
@@ -1374,7 +2100,7 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
             changed_match_ids = set()
             upstream_status = "UP"
 
-            logger.info(f"Starting precache run {run_id} at {run_timestamp} (iteration {loop_iteration})")
+            logger.info(f"Starting precache run {run_id} at {run_timestamp} (iteration {loop_iteration}) - Types: {', '.join(run_types)}")
             
             # Clear previous run metrics to ensure fresh data for this run
             PRECACHE_CHANGES_THIS_RUN.clear()
@@ -1390,20 +2116,73 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
         # Start timing for metrics
         with PRECACHE_DURATION_SECONDS.time():
             try:
-                # Step 1: Fetch fresh data from upstream API (without creating cache entries)
-                logger.info(f"Run {run_id}: Step 1 - Fetching fresh data from upstream API")
+                # Step 1: Fetch fresh data from upstream API based on run type
+                fresh_data_results = {}
                 
-                try:
-                    fresh_data_result = await pre_cache_getter(token_manager, run_id)
-                    api_calls = fresh_data_result["api_calls"]
-                except Exception as e:
-                    logger.error(f"Run {run_id}: Failed to fetch fresh data: {e}")
-                    # Set upstream status to DOWN and continue to next iteration
-                    PRECACHE_UPSTREAM_STATUS.labels(endpoint="data.nif.no").set(0)
-                    raise
+                # Always run PRIMARY
+                if run_primary:
+                    logger.info(f"Run {run_id}: Step 1a - Fetching PRIMARY data (basic data) from upstream API")
+                    try:
+                        with PRECACHE_RUN_TYPE_DURATION.labels(run_type="primary").time():
+                            primary_result = await pre_cache_getter_primary(token_manager, run_id)
+                            fresh_data_results["primary"] = primary_result
+                            # Update api_calls with primary data
+                            for key, value in primary_result["api_calls"].items():
+                                if key in api_calls:
+                                    api_calls[key] += value
+                                else:
+                                    api_calls[key] = value
+                        PRECACHE_RUN_TYPE_LAST_SUCCESS.labels(run_type="primary").set(start_time.timestamp())
+                    except Exception as e:
+                        logger.error(f"Run {run_id}: Failed to fetch PRIMARY data: {e}")
+                        # Set upstream status to DOWN and continue to next iteration
+                        PRECACHE_UPSTREAM_STATUS.labels(endpoint="data.nif.no").set(0)
+                        raise
+                
+                # Run SECONDARY if scheduled
+                if run_secondary:
+                    logger.info(f"Run {run_id}: Step 1b - Fetching SECONDARY data (clubs, teams) from upstream API")
+                    try:
+                        with PRECACHE_RUN_TYPE_DURATION.labels(run_type="secondary").time():
+                            secondary_result = await pre_cache_getter_secondary(token_manager, run_id)
+                            fresh_data_results["secondary"] = secondary_result
+                            # Update api_calls with secondary data
+                            for key, value in secondary_result["api_calls"].items():
+                                if key in api_calls:
+                                    api_calls[key] += value
+                                else:
+                                    api_calls[key] = value
+                        PRECACHE_RUN_TYPE_LAST_SUCCESS.labels(run_type="secondary").set(start_time.timestamp())
+                    except Exception as e:
+                        logger.error(f"Run {run_id}: Failed to fetch SECONDARY data: {e}")
+                        # Continue with primary data even if secondary fails
+                
+                # Run TERTIARY if scheduled
+                if run_tertiary:
+                    logger.info(f"Run {run_id}: Step 1c - Fetching TERTIARY data (venues, long-term) from upstream API")
+                    try:
+                        with PRECACHE_RUN_TYPE_DURATION.labels(run_type="tertiary").time():
+                            tertiary_result = await pre_cache_getter_tertiary(token_manager, run_id)
+                            fresh_data_results["tertiary"] = tertiary_result
+                            # Update api_calls with tertiary data
+                            for key, value in tertiary_result["api_calls"].items():
+                                if key in api_calls:
+                                    api_calls[key] += value
+                                else:
+                                    api_calls[key] = value
+                        PRECACHE_RUN_TYPE_LAST_SUCCESS.labels(run_type="tertiary").set(start_time.timestamp())
+                    except Exception as e:
+                        logger.error(f"Run {run_id}: Failed to fetch TERTIARY data: {e}")
+                        # Continue with primary/secondary data even if tertiary fails
+                
+                # Use primary data result for main comparison (backward compatibility)
+                if "primary" not in fresh_data_results:
+                    raise Exception("PRIMARY data fetch failed - cannot proceed")
+                    
+                fresh_data_result = fresh_data_results["primary"]
                 
                 # Step 2: Compare fresh data with cached data and update cache
-                logger.info(f"Run {run_id}: Step 2 - Comparing data and updating cache")
+                logger.info(f"Run {run_id}: Step 2 - Comparing PRIMARY data and updating cache")
                 
                 try:
                     comparison_result = await compare_and_update_cache(
@@ -1421,20 +2200,73 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                     changed_team_ids = comparison_result["changed_team_ids"]
                     changed_match_ids = comparison_result["changed_match_ids"]
                     upstream_status = comparison_result["upstream_status"]
+                
+                    # Initialize collections for secondary/tertiary changes
+                    changed_club_ids = set()
+                    changed_venue_ids = set()
+                
+                    # Step 2b: Compare and update SECONDARY data if it was fetched
+                    if run_secondary and "secondary" in fresh_data_results:
+                        logger.info(f"Run {run_id}: Step 2b - Comparing and updating SECONDARY data (clubs, teams)")
+                        try:
+                            secondary_comparison = await compare_and_update_secondary_cache(
+                                fresh_data_results["secondary"], 
+                                cache_manager, 
+                                run_id, 
+                                start_time, 
+                                run_timestamp
+                            )
+                            
+                            # Merge secondary changes into main changes_detected
+                            secondary_changes = secondary_comparison["changes_detected"]
+                            for key, value in secondary_changes.items():
+                                changes_detected[f"secondary_{key}"] = value
+                            
+                            changed_club_ids = secondary_comparison["changed_club_ids"]
+                            secondary_changed_teams = secondary_comparison["changed_team_ids"]
+                            
+                            logger.info(f"Run {run_id}: SECONDARY comparison complete - {len(changed_club_ids)} changed clubs, {len(secondary_changed_teams)} changed teams")
+                            
+                        except Exception as e:
+                            logger.error(f"Run {run_id}: Failed to compare SECONDARY data: {e}")
+                    
+                    # Step 2c: Compare and update TERTIARY data if it was fetched
+                    if run_tertiary and "tertiary" in fresh_data_results:
+                        logger.info(f"Run {run_id}: Step 2c - Comparing and updating TERTIARY data (venues)")
+                        try:
+                            tertiary_comparison = await compare_and_update_tertiary_cache(
+                                fresh_data_results["tertiary"], 
+                                cache_manager, 
+                                run_id, 
+                                start_time, 
+                                run_timestamp
+                            )
+                            
+                            # Merge tertiary changes into main changes_detected
+                            tertiary_changes = tertiary_comparison["changes_detected"]
+                            for key, value in tertiary_changes.items():
+                                changes_detected[f"tertiary_{key}"] = value
+                            
+                            changed_venue_ids = tertiary_comparison["changed_venue_ids"]
+                            
+                            logger.info(f"Run {run_id}: TERTIARY comparison complete - {len(changed_venue_ids)} changed venues")
+                            
+                        except Exception as e:
+                            logger.error(f"Run {run_id}: Failed to compare TERTIARY data: {e}")
 
-                    # These are the endpoints we want to warm for a match page:
-                    # api/v1/org/teams?orgId=
-                    # api/v1/org/teams?orgId=
-                    # api/v1/ta/match/?matchId=
-                    # api/v1/ta/matchincidents/?matchId=
-                    # api/v1/ta/matchreferee?matchId=
-                    # api/v1/ta/matchteammembers/8224291/?images=false
-                    # api/v1/ta/tournament/?tournamentId=440904
-                    # api/v1/ta/tournament/season/201065/?hierarchy=true
-                    # api/v1/org/clubsbysport/72/ 151
-                    # api/v1/venues/allvenues
-                    # api/v1/ta/venue/?venueId=10143
-                    # api/v1/ta/venueunit/?venueUnitId=33866
+                    ## These are the endpoints we want to warm for a match page:
+                    ## api/v1/org/teams?orgId=
+                    ## api/v1/org/teams?orgId=
+                    ## api/v1/ta/match/?matchId=
+                    ## api/v1/ta/matchincidents/?matchId=
+                    ## api/v1/ta/matchreferee?matchId=
+                    ## api/v1/ta/matchteammembers/8224291/?images=false
+                    ## api/v1/ta/tournament/?tournamentId=440904
+                    ## api/v1/ta/tournament/season/201065/?hierarchy=true
+                    ## api/v1/org/clubsbysport/72/ 151
+                    ## api/v1/venues/allvenues
+                    ## api/v1/ta/venue/?venueId=10143
+                    ## api/v1/ta/venueunit/?venueUnitId=33866
 
                     # if upstream_status is DOWN, do not replace data stored in any cache
                     if upstream_status == "DOWN":
@@ -1445,7 +2277,7 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                     logger.info(f"Run {run_id}: Step 3 - Warming caches for changed items")
                     
                     # Set cache warming flag to prevent other iterations from running
-                    cache_warming_needed = bool(changed_season_ids or changed_tournament_ids or changed_root_tournament_ids or changed_team_ids or changed_match_ids)
+                    cache_warming_needed = bool(changed_season_ids or changed_tournament_ids or changed_root_tournament_ids or changed_team_ids or changed_match_ids or changed_club_ids or changed_venue_ids)
                     
                     if cache_warming_needed:
                         CACHE_WARMING_IN_PROGRESS = True
@@ -1457,65 +2289,113 @@ async def detect_change_tournaments_and_matches(cache_manager, token_manager):
                         refresh_until = False  # TTL-only, no auto-refresh
 
 
-                        # if changed_season_ids:
-                        #     logger.info(f"Run {run_id}: Detected changes in {len(changed_season_ids)} seasons")
+                        if changed_season_ids:
+                            logger.info(f"Run {run_id}: Detected changes in {len(changed_season_ids)} seasons")
                             
-                        #     # api/v1/ta/tournament/season/201065/?hierarchy=true
+                            # api/v1/ta/tournament/season/201065/?hierarchy=true
                          
-                        #     for season_id in changed_season_ids:
-                        #         path = f"api/v1/ta/tournament/season/{season_id}/"
-                        #         target_url = f"{config.API_URL}/{path}"
-                        #         cache_key = f"GET:{path}?hierarchy=true"
+                            for season_id in changed_season_ids:
+                                path = f"api/v1/ta/tournament/season/{season_id}/"
+                                target_url = f"{config.API_URL}/{path}"
+                                cache_key = f"GET:{path}?hierarchy=true"
                                 
-                        #         success = await cache_manager.fetch_and_cache(cache_key, target_url, ttl, {"hierarchy": "true"})
-                        #         if success:
-                        #             logger.debug(f"Created TTL-only cache entry for season {season_id}: {cache_key}")
-                        #         else:
-                        #             logger.warning(f"Failed to create cache entry for season {season_id}: {cache_key}")
+                                success = await cache_manager.fetch_and_cache(cache_key, target_url, ttl, {"hierarchy": "true"})
+                                if success:
+                                    logger.debug(f"Created TTL-only cache entry for season {season_id}: {cache_key}")
+                                else:
+                                    logger.warning(f"Failed to create cache entry for season {season_id}: {cache_key}")
 
 
                         # if changed_root_tournament_ids:
                         #     logger.info(f"Run {run_id}: Detected changes in {len(changed_root_tournament_ids)} root tournaments")
                         
 
-                        # if changed_tournament_ids:
-                        #     logger.info(f"Run {run_id}: Detected changes in {len(changed_tournament_ids)} tournaments")
-                        #     for tournament_id in changed_tournament_ids:
-                        #         path = f"api/v1/ta/tournament/"
-                        #         target_url = f"{config.API_URL}/{path}"
-                        #         cache_key = f"GET:{path}?tournamentId={tournament_id}"
-                        #         if refresh_until is not False:
-                        #             # Use setup_refresh for auto-refresh functionality
-                        #             await cache_manager.setup_refresh(
-                        #                 cache_key, target_url, ttl, refresh_until, params={"tournamentId": tournament_id}
-                        #             )
-                        #             logger.debug(f"Set up auto-refresh cache for tournament {tournament_id}: {cache_key}")
-                        #         else:
-                        #             # Fetch and cache data directly without auto-refresh
-                        #             success = await cache_manager.fetch_and_cache(cache_key, target_url, ttl, {"tournamentId": tournament_id})
-                        #             if success:
-                        #                 logger.debug(f"Created TTL-only cache entry for tournament {tournament_id}: {cache_key}")
-                        #             else:
-                        #                 logger.warning(f"Failed to create cache entry for tournament {tournament_id}: {cache_key}")
+                        if changed_tournament_ids:
+                            logger.info(f"Run {run_id}: Detected changes in {len(changed_tournament_ids)} tournaments")
+                            for tournament_id in changed_tournament_ids:
+                                path = f"api/v1/ta/tournament/"
+                                target_url = f"{config.API_URL}/{path}"
+                                cache_key = f"GET:{path}?tournamentId={tournament_id}"
+                                if refresh_until is not False:
+                                    # Use setup_refresh for auto-refresh functionality
+                                    await cache_manager.setup_refresh(
+                                        cache_key, target_url, ttl, refresh_until, params={"tournamentId": tournament_id}
+                                    )
+                                    logger.debug(f"Set up auto-refresh cache for tournament {tournament_id}: {cache_key}")
+                                else:
+                                    # Fetch and cache data directly without auto-refresh
+                                    success = await cache_manager.fetch_and_cache(cache_key, target_url, ttl, {"tournamentId": tournament_id})
+                                    if success:
+                                        logger.debug(f"Created TTL-only cache entry for tournament {tournament_id}: {cache_key}")
+                                    else:
+                                        logger.warning(f"Failed to create cache entry for tournament {tournament_id}: {cache_key}")
 
-                        # if changed_team_ids:
-                        #     logger.info(f"Run {run_id}: Detected changes in {len(changed_team_ids)} teams")
+                        if changed_team_ids:
+                            logger.info(f"Run {run_id}: Detected changes in {len(changed_team_ids)} teams")
                             
-                        #     # Process teams in batches to prevent overwhelming the system
-                        #     team_ids_list = list(changed_team_ids)
-                        #     for batch_start in range(0, len(team_ids_list), BATCH_SIZE):
-                        #         batch_end = min(batch_start + BATCH_SIZE, len(team_ids_list))
-                        #         team_batch = team_ids_list[batch_start:batch_end]
+                            # Process teams in batches to prevent overwhelming the system
+                            team_ids_list = list(changed_team_ids)
+                            for batch_start in range(0, len(team_ids_list), BATCH_SIZE):
+                                batch_end = min(batch_start + BATCH_SIZE, len(team_ids_list))
+                                team_batch = team_ids_list[batch_start:batch_end]
                                 
-                        #         logger.info(f"Run {run_id}: Processing team batch {batch_start//BATCH_SIZE + 1}/{(len(team_ids_list) + BATCH_SIZE - 1)//BATCH_SIZE} ({len(team_batch)} teams)")
+                                logger.info(f"Run {run_id}: Processing team batch {batch_start//BATCH_SIZE + 1}/{(len(team_ids_list) + BATCH_SIZE - 1)//BATCH_SIZE} ({len(team_batch)} teams)")
                                 
-                        #         # Process this batch of teams
-                        #         await process_team_cache_batch(team_batch, cache_manager, ttl, refresh_until, run_id)
+                                # Process this batch of teams
+                                await process_team_cache_batch(team_batch, cache_manager, ttl, refresh_until, run_id)
                                 
-                        #         # Delay between batches to prevent overwhelming the system
-                        #         if batch_end < len(team_ids_list):
-                        #             logger.debug(f"Run {run_id}: Waiting {BATCH_DELAY}s before next batch")
-                        #             await asyncio.sleep(BATCH_DELAY)
+                                # Delay between batches to prevent overwhelming the system
+                                if batch_end < len(team_ids_list):
+                                    logger.debug(f"Run {run_id}: Waiting {BATCH_DELAY}s before next batch")
+                                    await asyncio.sleep(BATCH_DELAY)
+                        
+                        # Handle SECONDARY data cache warming
+                        if changed_club_ids:
+                            logger.info(f"Run {run_id}: Detected changes in {len(changed_club_ids)} clubs - warming club-related caches")
+                            
+                            for club_id in changed_club_ids:
+                                # Cache club-specific endpoints if they exist in your API
+                                # For now, we'll warm the general clubsbysport cache
+                                for sport_id in [72, 151]:  # 72=Innebandy, 151=Bandy
+                                    path = f"api/v1/org/clubsbysport/{sport_id}/"
+                                    target_url = f"{config.API_URL}/{path}"
+                                    cache_key = f"GET:{path}"
+                                    
+                                    success = await cache_manager.fetch_and_cache(cache_key, target_url, ttl, {})
+                                    if success:
+                                        logger.debug(f"Created TTL-only cache entry for clubs sport {sport_id}: {cache_key}")
+                                    else:
+                                        logger.warning(f"Failed to create cache entry for clubs sport {sport_id}: {cache_key}")
+                        
+                        # Handle TERTIARY data cache warming  
+                        if changed_venue_ids:
+                            logger.info(f"Run {run_id}: Detected changes in {len(changed_venue_ids)} venues - warming venue-related caches")
+                            
+                            # Warm the general venues cache
+                            path = f"api/v1/venues/allvenues"
+                            target_url = f"{config.API_URL}/{path}"
+                            cache_key = f"GET:{path}"
+                            
+                            success = await cache_manager.fetch_and_cache(cache_key, target_url, ttl, {})
+                            if success:
+                                logger.debug(f"Created TTL-only cache entry for all venues: {cache_key}")
+                            else:
+                                logger.warning(f"Failed to create cache entry for all venues: {cache_key}")
+                            
+                            # Warm specific venue detail caches
+                            for venue_id in list(changed_venue_ids)[:20]:  # Limit to prevent overload
+                                path = f"api/v1/ta/venue/"
+                                target_url = f"{config.API_URL}/{path}"
+                                cache_key = f"GET:{path}?venueId={venue_id}"
+                                
+                                success = await cache_manager.fetch_and_cache(cache_key, target_url, ttl, {"venueId": venue_id})
+                                if success:
+                                    logger.debug(f"Created TTL-only cache entry for venue {venue_id}: {cache_key}")
+                                else:
+                                    logger.warning(f"Failed to create cache entry for venue {venue_id}: {cache_key}")
+                                
+                                # Small delay between venue cache setups
+                                await asyncio.sleep(0.1)
 
                         # if changed_match_ids:
                         #     # Limit the number of matches to cache to prevent system overload

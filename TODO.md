@@ -10,20 +10,34 @@ Separate into 3 parts:
 
 3. PROCESS CHANGES
 
-Currently, the code mixes these three concerns together, making it hard to follow.
 
-## current cache size and endpoints should be same
+## make a different timers
 
-## METRICS:
+1. gets data from DATA.NIF.NO every 3 minutes = PRIMARY RUN ( 3 minutes )
+2. gets additional data from DATA.NIF.NO every 3 runs = SECONDARY RUN  ( 9 minutes )
+3. gets additional data from DATA.NIF.NO every 300 runs = TERTIARY RUN ( 15 hours )
 
-### Add metrics for pre-cache-calling with metrics for
+### PRIMARY RUN
 
--   total calls made
--   total failures
--   total time taken
--   number of changes detected - with regard to saved data.
+- get basic data from DATA.NIF.NO
+- store data in redis
+- check for changes
+- if changes, process changes ( PRIMARY RUN CHANGES )
 
-### add metrics for redis-server
+### SECONDARY RUN
 
--   current memory usage
--   current number of keys
+- get additional data from DATA.NIF.NO
+- store data in redis
+- check for changes
+- if changes, process changes ( SECONDARY RUN CHANGES )
+
+clubs data from DATA.NIF.NO every 3 runs = SECONDARY RUN ( 9 minutes )
+team data from DATA.NIF.NO every 3 runs = SECONDARY RUN ( 9 minutes )
+
+### TERTIARY RUN
+- get additional data from DATA.NIF.NO
+- store data in redis
+- check for changes
+- if changes, process changes ( TERTIARY RUN CHANGES )
+
+get venues data from DATA.NIF.NO every 300 runs = TERTIARY RUN ( 15 hours )
