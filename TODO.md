@@ -1,5 +1,10 @@
 # TODO
 
+# Staging
+
+/home/apiproxy/staging/
+
+
 ## make precache.py more readable
 
 Separate into 3 parts:
