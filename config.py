@@ -20,6 +20,8 @@ config = Box(
         "API_CLIENT_ID": os.getenv("API_CLIENT_ID"),
         "API_CLIENT_SECRET": os.getenv("API_CLIENT_SECRET"),
         "DEFAULT_TTL": int(os.getenv("DEFAULT_TTL", 30)),
+        "DEFAULT_MAXSTALE": int(os.getenv("DEFAULT_MAXSTALE", 600)),  # 10 minutes
+        "DEFAULT_HARDTTL": int(os.getenv("DEFAULT_HARDTTL", 7200)),  # 2 hours
         "LOG_PATH": os.getenv("LOG_PATH", "logs"),
         "LOG_FILE": os.getenv("LOG_FILE", "app.log"),
         "LOG_LEVEL": os.getenv("LOG_LEVEL", "DEBUG"),
@@ -27,6 +29,5 @@ config = Box(
         "MAX_CONNECTIONS": int(os.getenv("MAX_CONNECTIONS", 100)),
         "MAX_KEEPALIVE_CONNECTIONS": int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", 20)),
         "MAX_REDIS_CONNECTIONS": int(os.getenv("MAX_REDIS_CONNECTIONS", 100)),
-        "PRECACHE_AUTO_START": os.getenv("PRECACHE_AUTO_START", "false").lower() in ("true", "1", "yes", "on"),
     })
     

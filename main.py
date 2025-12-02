@@ -14,15 +14,12 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from .cache import CacheManager
 from .config import config
-from .precache import precache_orchestrator, clear_precache_data
+from .health import get_nif_health, health_checker
 from .prometheus import (
-    REQUEST_COUNT,
-    REQUEST_LATENCY,
     CACHE_HITS,
     CACHE_MISSES,
-    CACHE_HIT_RATIO,
-    record_cache_request,
-    update_cache_size_metrics,
+    REQUEST_COUNT,
+    REQUEST_LATENCY,
 )
 from .stats import StatsCollector
 from .token import TokenManager
@@ -34,7 +31,6 @@ from .util import (
     process_query_params,
     redis_pool,
     refresh_base_data,
-    background_tasks,
 )
 
 logger = get_logger(__name__)
@@ -43,7 +39,7 @@ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 app = FastAPI(
     title="NIF API Gateway",
-    version="0.1.2",
+    version="0.1",
     description="API Gateway for NIF API. This gateway is responsible for caching and logging requests to the external API.",
     openapi_url=f"{config.BASE_PATH}/openapi.json",
 )
@@ -64,58 +60,17 @@ token_manager = TokenManager()
 cache_manager = CacheManager(token_manager)
 stats_collector = StatsCollector()
 
-# Global variable to track the precache task
-precache_task = None
-
-
-async def update_cache_metrics_periodically():
-    """Periodically update cache size metrics"""
-    while True:
-        try:
-            # Wait 60 seconds between updates
-            await asyncio.sleep(60)
-            
-            # Get cache information
-            redis_client = get_redis_client()
-            keys = await redis_client.keys("GET:*")
-            
-            # Count total items and unique endpoints
-            total_items = len(keys)
-            unique_endpoints = set()
-            
-            for key in keys:
-                key_str = key.decode("utf-8") if isinstance(key, bytes) else key
-                endpoint = key_str.replace("GET:", "")
-                unique_endpoints.add(endpoint)
-            
-            # Update metrics
-            update_cache_size_metrics(total_items, len(unique_endpoints))
-            
-            await redis_client.close()
-            
-        except Exception as e:
-            logger.error(f"Error updating cache metrics: {e}")
-            # Continue the loop even if there's an error
-            continue
-
 
 @app.on_event("startup")
 async def startup_event():
-    global precache_task
-    
-    # Only start precache if configured to do so
-    if config.PRECACHE_AUTO_START:
-        logger.info("PRECACHE_AUTO_START is enabled - starting precache task on startup")
-        precache_task = asyncio.create_task(precache_orchestrator(cache_manager, token_manager))
-        background_tasks.add(precache_task)
-        precache_task.add_done_callback(background_tasks.discard)
-    else:
-        logger.info("PRECACHE_AUTO_START is disabled - precache task not started on startup")
-    
-    # Start cache metrics update task
-    cache_metrics_task = asyncio.create_task(update_cache_metrics_periodically())
-    background_tasks.add(cache_metrics_task)
-    cache_metrics_task.add_done_callback(background_tasks.discard)
+    """Start background services on app startup."""
+    await health_checker.start()
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Stop background services on app shutdown."""
+    await health_checker.stop()
 
 
 @app.middleware("http")
@@ -160,67 +115,6 @@ async def list_cache():
     return await cache_manager.list_cache()
 
 
-@app.get("/cache/production-metrics", summary="Get production cache metrics", tags=["Cache", "Monitoring"])
-async def get_production_metrics():
-    """Get comprehensive cache metrics for production monitoring"""
-    return await cache_manager.get_production_metrics()
-
-
-@app.get("/redis/status", summary="Get quick Redis status", tags=["Cache", "Monitoring"])
-async def get_redis_status():
-    """Get quick Redis status for development monitoring"""
-    redis = None
-    try:
-        redis = get_redis_client()
-        
-        # Get basic stats
-        memory_info = await redis.info("memory")
-        stats_info = await redis.info("stats")
-        clients_info = await redis.info("clients")
-        
-        # Quick key counts
-        total_keys = await redis.dbsize()
-        
-        # Hit ratio
-        hits = stats_info.get('keyspace_hits', 0)
-        misses = stats_info.get('keyspace_misses', 0)
-        hit_ratio = (hits / (hits + misses) * 100) if (hits + misses) > 0 else 0
-        
-        status = {
-            "status": "healthy",
-            "memory": {
-                "used_mb": round(memory_info.get('used_memory', 0) / 1024 / 1024, 2),
-                "fragmentation_ratio": memory_info.get('mem_fragmentation_ratio', 0)
-            },
-            "performance": {
-                "total_keys": total_keys,
-                "hit_ratio_percent": round(hit_ratio, 2),
-                "ops_per_sec": stats_info.get('instantaneous_ops_per_sec', 0),
-                "connected_clients": clients_info.get('connected_clients', 0)
-            },
-            "timestamp": pendulum.now().isoformat()
-        }
-        
-        return status
-        
-    except Exception as e:
-        logger.error(f"Error getting Redis status: {e}")
-        return {
-            "status": "error",
-            "error": str(e),
-            "timestamp": pendulum.now().isoformat()
-        }
-    finally:
-        if redis:
-            await redis.close()
-
-
-@app.post("/cache/optimize", summary="Optimize cache memory usage", tags=["Cache", "Monitoring"])
-async def optimize_cache():
-    """Optimize cache memory usage without hard limits"""
-    return await cache_manager.optimize_memory_usage()
-
-
 @app.delete(
     "/cache/{path:path}", summary="Clear cache for a specific endpoint", tags=["Cache"]
 )
@@ -236,141 +130,6 @@ async def clear_cache(path: str):
 )
 async def clear_all_cache():
     return await cache_manager.clear_all_cache()
-
-
-@app.delete(
-    "/precache",
-    summary="Clear precache data",
-    description="Clear all precache data (seasons, tournaments, matches, team IDs) from Redis",
-    tags=["Cache"],
-)
-async def clear_precache():
-    """Clear all precache data from Redis."""
-    return await clear_precache_data()
-
-
-@app.post(
-    "/stop_precache",
-    summary="Stop precache process",
-    description="Stop the running precache periodic task",
-    tags=["Cache"],
-)
-async def stop_precache():
-    """Stop the running precache task."""
-    global precache_task
-    
-    start_time = pendulum.now()
-    logger.info(f"POST /stop_precache called at {start_time.isoformat()}")
-    
-    if precache_task is None:
-        error_msg = "No precache task is currently running"
-        logger.warning(f"POST /stop_precache failed: {error_msg}")
-        return {
-            "status": "error",
-            "message": error_msg
-        }
-    
-    if precache_task.done():
-        error_msg = "Precache task is not running (already completed or cancelled)"
-        logger.warning(f"POST /stop_precache failed: {error_msg}")
-        return {
-            "status": "error", 
-            "message": error_msg
-        }
-    
-    # Log task details before cancellation
-    task_id = id(precache_task)
-    logger.info(f"Attempting to cancel precache task with ID {task_id}")
-    
-    # Cancel the task
-    precache_task.cancel()
-    logger.info(f"Cancel signal sent to precache task {task_id}")
-    
-    try:
-        # Wait for the task to be cancelled (with a short timeout)
-        await asyncio.wait_for(precache_task, timeout=2.0)
-        logger.info(f"Precache task {task_id} completed gracefully after cancel signal")
-    except asyncio.CancelledError:
-        # Task was successfully cancelled
-        logger.info(f"Precache task {task_id} was successfully cancelled")
-        pass
-    except asyncio.TimeoutError:
-        # Task didn't respond to cancellation quickly
-        logger.warning(f"Precache task {task_id} did not respond to cancellation within 2 seconds")
-        pass
-    
-    # Remove from background_tasks set
-    background_tasks.discard(precache_task)
-    logger.info(f"Precache task {task_id} removed from background_tasks, remaining count: {len(background_tasks)}")
-    precache_task = None
-    
-    success_msg = "Precache task has been stopped"
-    logger.info(f"POST /stop_precache completed successfully: {success_msg}")
-    
-    log_item = {
-        "action": "stop_precache_endpoint",
-        "timestamp": start_time.isoformat(),
-        "status": "success", 
-        "task_id": task_id,
-        "background_tasks_count": len(background_tasks)
-    }
-    logger.info(f"logEndpoint: {json.dumps(log_item, ensure_ascii=False)}")
-    
-    return {
-        "status": "success",
-        "message": success_msg
-    }
-
-
-@app.post(
-    "/start_precache",
-    summary="Start precache process",
-    description="Start the precache periodic task",
-    tags=["Cache"],
-)
-async def start_precache():
-    """Start the precache task."""
-    global precache_task
-    
-    start_time = pendulum.now()
-    logger.info(f"POST /start_precache called at {start_time.isoformat()}")
-    
-    # Check if a task is already running
-    if precache_task is not None and not precache_task.done():
-        error_msg = "A precache task is already running"
-        logger.warning(f"POST /start_precache failed: {error_msg}")
-        return {
-            "status": "error",
-            "message": error_msg
-        }
-    
-    # Start a new precache task
-    logger.info(f"Starting new precache task with precache_orchestrator function")
-    precache_task = asyncio.create_task(precache_orchestrator(cache_manager, token_manager))
-    background_tasks.add(precache_task)
-    precache_task.add_done_callback(background_tasks.discard)
-    
-    # Log task creation details
-    task_id = id(precache_task)
-    logger.info(f"Precache task created successfully with ID {task_id}")
-    logger.info(f"Task added to background_tasks, current background_tasks count: {len(background_tasks)}")
-    
-    success_msg = "Precache task has been started"
-    logger.info(f"POST /start_precache completed successfully: {success_msg}")
-    
-    log_item = {
-        "action": "start_precache_endpoint",
-        "timestamp": start_time.isoformat(),
-        "status": "success",
-        "task_id": task_id,
-        "background_tasks_count": len(background_tasks)
-    }
-    logger.info(f"logEndpoint: {json.dumps(log_item, ensure_ascii=False)}")
-    
-    return {
-        "status": "success",
-        "message": success_msg
-    }
 
 
 @app.get(
@@ -414,6 +173,17 @@ async def health_check():
     finally:
         if redis_client:
             await redis_client.close()
+
+
+@app.get(
+    "/nif-status",
+    summary="NIF API health status",
+    description="Get the current health status of the NIF API based on recent requests",
+    tags=["Health"],
+)
+async def nif_status():
+    """Get the NIF API health status and metadata."""
+    return await get_nif_health()
 
 
 @app.get("/debug/connections", summary="Debug Redis connections", tags=["Debug"])
@@ -501,7 +271,7 @@ async def trigger_refresh():
         # Run the refresh in a background task
         redis_client = get_redis_client()
         client = get_http_client()
-        asyncio.create_task(refresh_base_data(redis_client, client, token_manager))
+        asyncio.create_task(refresh_base_data(redis_client, client, token_manager, cache_manager))
 
         return {
             "status": "refresh_started",
@@ -520,99 +290,6 @@ async def trigger_refresh():
             await redis_client.close()
         if client:
             await client.aclose()
-
-
-@app.get(
-    "/direct/{path:path}",
-    summary="Direct proxy to external API (no cache)",
-    description="Forward requests directly to the external API without any caching",
-    tags=["Proxy"],
-)
-async def direct_proxy(request: Request, path: str):
-    """Forward requests directly to the external API without caching"""
-    logger.info(f"Direct request for {path}")
-
-    # Process path and parameters
-    path = unquote(path.lower())
-    params = dict(request.query_params) or {}
-
-    # Handle path with embedded query params
-    url_params = None
-    paths = path.split("?")
-    if len(paths) > 1:
-        path, url_params = paths
-    else:
-        path = paths[0]
-
-    # Merge URL params with query params
-    if url_params:
-        try:
-            params.update(
-                {k: v for k, v in [param.split("=") for param in url_params.split("&")]}
-            )
-        except ValueError:
-            logger.warning(f"Invalid URL parameters: {url_params}")
-
-    # Clean the path and build target URL
-    path = path.replace("//", "/")
-    target_url = f"{config.API_URL}/{path}"
-    base_endpoint, has_id = extract_base_endpoint(path)
-
-    logger.info(f"Direct request to: {target_url}")
-
-    # Update request metrics
-    REQUEST_COUNT.labels(
-        method=request.method, endpoint=f"direct:{base_endpoint}", has_id=str(has_id)
-    ).inc()
-
-    with REQUEST_LATENCY.labels(method=request.method, endpoint=f"direct:{base_endpoint}").time():
-        try:
-            token = await token_manager.get_token()
-            headers = dict(request.headers)
-            headers["Authorization"] = f"Bearer {token['access_token']}"
-            method = request.method.lower()
-            request_kwargs = {
-                "url": target_url,
-                "headers": {
-                    k: v
-                    for k, v in headers.items()
-                    if k.lower() not in ["host", "connection"]
-                },
-            }
-
-            # Add body for POST/PUT requests
-            if method in ["post", "put"]:
-                body = await request.body()
-                request_kwargs["content"] = body
-
-            # Forward query parameters
-            if params:
-                request_kwargs["params"] = params
-
-            # Make the direct request to external API (no caching)
-            client = get_http_client()
-            response = await getattr(client, method)(**request_kwargs)
-            await client.aclose()
-
-            # Create response headers, removing content-encoding
-            response_headers = dict(response.headers)
-            if "content-encoding" in response_headers:
-                del response_headers["content-encoding"]
-
-            # Return the response from the external API with direct indicator
-            return Response(
-                content=response.content,
-                status_code=response.status_code,
-                headers={**response_headers, "X-Cache": "DIRECT"},
-            )
-        except Exception as e:
-            logger.error(f"Error in direct proxy request to {target_url}: {e}")
-            logger.exception(e)
-            return Response(
-                content=json.dumps({"error": str(e)}),
-                status_code=500,
-                media_type="application/json",
-            )
 
 
 @app.get(
@@ -646,12 +323,14 @@ async def proxy(request: Request, path: str):
         except ValueError:
             logger.warning(f"Invalid URL parameters: {url_params}")
 
-    # Extract special parameters (TTL, refresh, no_cache)
-    params, ttl, autorefresh_until, no_cache = process_query_params(params)
+    # Extract special parameters (TTL, maxstale, hardttl, refresh, no_cache)
+    params, ttl, maxstale, hardttl, autorefresh_until, no_cache = process_query_params(params)
     ttl = ttl or config.DEFAULT_TTL
+    maxstale = maxstale or config.DEFAULT_MAXSTALE
+    hardttl = hardttl or config.DEFAULT_HARDTTL
 
     logger.info(
-        f"Processed query params: {params}, TTL: {ttl}, autorefresh: {autorefresh_until}, no_cache: {no_cache}"
+        f"Processed query params: {params}, TTL: {ttl}, maxstale: {maxstale}, hardttl: {hardttl}, autorefresh: {autorefresh_until}, no_cache: {no_cache}"
     )
 
     # Clean the path and build target URL
@@ -675,15 +354,26 @@ async def proxy(request: Request, path: str):
         method=request.method, endpoint=base_endpoint, has_id=str(has_id)
     ).inc()
 
-    # Check cache first
-    if not no_cache and is_refresh:
+    # Check cache first (unless explicitly bypassed with _nocache)
+    if not no_cache:
         cache_data = await cache_manager.get_cached_response(cache_key)
 
         if cache_data:
-            # Record cache hit with time-based metrics
-            record_cache_request(base_endpoint, hit=True)
+            CACHE_HITS.labels(endpoint=base_endpoint).inc()
 
-            # handle autorefresh
+            # Determine staleness level
+            cache_status, data_age = cache_manager.get_cache_staleness(cache_data)
+
+            # Get NIF API health status
+            nif_health = await get_nif_health()
+
+            # If data is stale, trigger background refresh
+            if cache_status in ("STALE", "VERY-STALE"):
+                await cache_manager.background_refresh(
+                    cache_key, target_url, ttl, params, maxstale, hardttl
+                )
+
+            # Setup autorefresh if requested (only if not already refreshing)
             if autorefresh_until and not is_refresh:
                 await cache_manager.setup_refresh(
                     cache_key, target_url, ttl, autorefresh_until, params
@@ -693,15 +383,19 @@ async def proxy(request: Request, path: str):
             if "content-encoding" in headers:
                 del headers["content-encoding"]
 
-            # Reconstruct the response with original status code and headers
+            # Reconstruct the response with staleness headers
             return Response(
                 content=cache_data["content"],
                 status_code=cache_data["status_code"],
-                headers={**headers, "X-Cache": "HIT"},
+                headers={
+                    **headers,
+                    "X-Cache": cache_status,
+                    "X-Data-Age": str(data_age),
+                    "X-NIF-API-Status": nif_health.get("status", "unknown"),
+                },
             )
 
-    # Record cache miss with time-based metrics
-    record_cache_request(base_endpoint, hit=False)
+    CACHE_MISSES.labels(endpoint=base_endpoint).inc()
 
     with REQUEST_LATENCY.labels(method=request.method, endpoint=base_endpoint).time():
         try:
@@ -734,7 +428,9 @@ async def proxy(request: Request, path: str):
 
             # Cache the result with TTL or 30s by default
             if request.method == "GET" and 200 <= response.status_code < 300:
-                cached = await cache_manager.cache_response(cache_key, response, ttl)
+                cached = await cache_manager.cache_response(
+                    cache_key, response, ttl, maxstale, hardttl
+                )
 
                 if cached and autorefresh_until:
                     await cache_manager.setup_refresh(
@@ -746,11 +442,19 @@ async def proxy(request: Request, path: str):
             if "content-encoding" in response_headers:
                 del response_headers["content-encoding"]
 
+            # Get NIF API health for response header
+            nif_health = await get_nif_health()
+
             # Return the response from the external API
             return Response(
                 content=response.content,
                 status_code=response.status_code,
-                headers={**response_headers, "X-Cache": "MISS"},
+                headers={
+                    **response_headers,
+                    "X-Cache": "MISS",
+                    "X-Data-Age": "0",
+                    "X-NIF-API-Status": nif_health.get("status", "unknown"),
+                },
             )
         except Exception as e:
             logger.error(f"Error proxying request to {target_url}: {e}")
@@ -767,15 +471,24 @@ async def proxy(request: Request, path: str):
                             cache_key, target_url, ttl, autorefresh_until, params
                         )
 
+                    # Get staleness info for headers
+                    cache_status, data_age = cache_manager.get_cache_staleness(cache_data)
+                    nif_health = await get_nif_health()
+
                     headers = cache_data["headers"]
                     if "content-encoding" in headers:
                         del headers["content-encoding"]
 
-                    # Reconstruct the response with original status code and headers
+                    # Reconstruct the response with staleness headers
                     return Response(
                         content=cache_data["content"],
                         status_code=cache_data["status_code"],
-                        headers={**headers, "X-Cache": "HIT"},
+                        headers={
+                            **headers,
+                            "X-Cache": cache_status,
+                            "X-Data-Age": str(data_age),
+                            "X-NIF-API-Status": nif_health.get("status", "unknown"),
+                        },
                     )
             except Exception as ex:
                 logger.error(f"Error getting cached data: {ex}")

@@ -1,7 +1,9 @@
 # Copyright (C) 2025 Sasha Shipka <sasha.shipka@copyleft.no>
 # You may use, distribute and modify this code under the terms of the GNU General Public License v3.0
 
-from .util import extract_base_endpoint, get_logger, get_redis_client
+from .cache import extract_base_endpoint
+
+from .util import get_logger, get_redis_client
 
 logger = get_logger(__name__)
 

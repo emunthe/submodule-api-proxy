@@ -89,6 +89,8 @@ def extract_base_endpoint(path):
 def process_query_params(params):
     """Extract special parameters from query params"""
     ttl = params.pop("TTL", None) or params.pop("ttl", None)
+    maxstale = params.pop("maxstale", None)
+    hardttl = params.pop("hardttl", None)
     autorefreshuntil = params.pop("autorefreshuntil", None)
     no_cache = params.pop("_nocache", None)
 
@@ -99,6 +101,20 @@ def process_query_params(params):
         except ValueError:
             ttl = config.DEFAULT_TTL
 
+    # Convert maxstale to int if present
+    if maxstale:
+        try:
+            maxstale = int(maxstale)
+        except ValueError:
+            maxstale = config.DEFAULT_MAXSTALE
+
+    # Convert hardttl to int if present
+    if hardttl:
+        try:
+            hardttl = int(hardttl)
+        except ValueError:
+            hardttl = config.DEFAULT_HARDTTL
+
     # Parse autorefresh date if present
     refresh_until = None
     if autorefreshuntil:
@@ -108,7 +124,7 @@ def process_query_params(params):
             # Log but continue without auto-refresh
             logger.warning(f"Invalid autorefreshuntil format: {autorefreshuntil}")
 
-    return params, ttl, refresh_until, no_cache
+    return params, ttl, maxstale, hardttl, refresh_until, no_cache
 
 
 def parse_datetime(datetime_str):
@@ -138,14 +154,16 @@ def parse_datetime(datetime_str):
     return pendulum.parse(datetime_str)
 
 
-async def refresh_base_data(redis_client, http_client, token_manager):
+async def refresh_base_data(redis_client, http_client, token_manager, cache_manager=None):
     """
-    Fetch combined base data and store it permanently in Redis
+    Fetch combined base data and store it permanently in Redis.
+    Also pre-cache critical endpoints for Bandyforbund (sport 72 - Innebandy).
 
     Args:
         redis_client: Redis client instance
         http_client: HTTP client instance
         token_manager: Token manager instance
+        cache_manager: Optional CacheManager instance for pre-caching large endpoints
 
     Returns:
         bool: True if successful, False otherwise
@@ -229,6 +247,34 @@ async def refresh_base_data(redis_client, http_client, token_manager):
         await redis_client.set(cache_key, json.dumps(base_data))
 
         logger.info(f"Base data refreshed successfully at {base_data['last_updated']}")
+
+        # Pre-cache critical large endpoint for Bandyforbund (sport 72)
+        # This avoids 10-second delays when users first access the clubs list
+        if cache_manager:
+            logger.info("Pre-caching ClubsBySport/72 (Innebandy) - critical for Bandyforbund")
+
+            try:
+                clubs_url = f"{config.API_URL}/api/v1/org/ClubsBySport/72/"
+                clubs_cache_key = "GET:api/v1/org/clubsbysport/72/?ttl=10000&autorefreshuntil=5d"
+                clubs_ttl = 10000
+
+                logger.info(f"Fetching ClubsBySport/72 (this may take 10 seconds due to 9.5MB payload)")
+                clubs_response = await http_client.get(
+                    clubs_url,
+                    headers={"Authorization": f"Bearer {token['access_token']}"}
+                )
+
+                if 200 <= clubs_response.status_code < 300:
+                    await cache_manager.cache_response(clubs_cache_key, clubs_response, clubs_ttl)
+                    size_mb = len(clubs_response.content) / (1024 * 1024)
+                    logger.info(f"✓ Pre-cached ClubsBySport/72: {size_mb:.2f} MB")
+                else:
+                    logger.warning(f"Failed to pre-cache ClubsBySport/72: HTTP {clubs_response.status_code}")
+
+            except Exception as e:
+                logger.error(f"Error pre-caching ClubsBySport/72: {e}")
+                # Don't fail the entire refresh if pre-caching fails
+
         return True
     except Exception as e:
         logger.error(f"Failed to refresh base data: {e}")

@@ -7,18 +7,13 @@ import click
 import logging
 import sys
 from app.config import config
-from app.util import (
-    get_logger,
-    get_redis_client,
-    get_http_client,
-    refresh_base_data,
-)
+from app.util import get_logger, get_redis_client, get_http_client
 from app.token import TokenManager
+from app.cache import CacheManager
+from app.util import refresh_base_data
 import os
 
 logger = get_logger(__name__)
-redis_client = get_redis_client()
-http_client = get_http_client()
 
 # Configure logger for CLI
 formatter = logging.Formatter("%(asctime)s: %(name)s [%(levelname)s] - %(message)s")
@@ -44,13 +39,20 @@ def refresh_data():
     """Refresh the permanent base data in Redis."""
     click.echo("Starting base data refresh...")
 
-    # Create token manager
-    token_manager = TokenManager()
-
     # Create and run the async task
     async def run_refresh():
+        redis_client = None
+        http_client = None
         try:
-            result = await refresh_base_data(redis_client, http_client, token_manager)
+            # Get clients from pool/factory
+            redis_client = get_redis_client()
+            http_client = get_http_client()
+
+            # Create token manager and cache manager
+            token_manager = TokenManager()
+            cache_manager = CacheManager(token_manager)
+
+            result = await refresh_base_data(redis_client, http_client, token_manager, cache_manager)
             if result:
                 click.echo("Base data refresh completed successfully!")
                 return 0
@@ -59,8 +61,10 @@ def refresh_data():
                 return 1
         finally:
             # Clean up resources
-            await http_client.aclose()
-            await redis_client.aclose()
+            if http_client:
+                await http_client.aclose()
+            if redis_client:
+                await redis_client.aclose()
 
     # Run the async function and exit with appropriate code
     return asyncio.run(run_refresh())

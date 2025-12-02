@@ -7,7 +7,7 @@ import json
 import pendulum
 
 from .config import config
-from .prometheus import record_cache_refresh, update_cache_size_metrics, CACHE_SIZE, update_current_cache_size
+from .prometheus import CACHE_REFRESH
 from .util import (
     extract_base_endpoint,
     get_http_client,
@@ -60,33 +60,65 @@ class CacheManager:
             if redis:
                 await redis.close()
 
-    async def cache_response(self, cache_key, response, ttl):
-        """Cache a response with the given TTL - Production optimized"""
+    async def cache_response(self, cache_key, response, ttl, maxstale=None, hardttl=None):
+        """Cache a response with staleness tracking.
+
+        Args:
+            cache_key: Redis key for the cached response
+            response: HTTP response to cache
+            ttl: Soft TTL - when to trigger background refresh (seconds)
+            maxstale: Max age before flagging as "very stale" (seconds)
+            hardttl: Redis expiration time (seconds)
+        """
         if 200 <= response.status_code < 300:
             headers = dict(response.headers)
             if "content-encoding" in headers:
                 del headers["content-encoding"]
 
+            # Use defaults if not provided
+            maxstale = maxstale or config.DEFAULT_MAXSTALE
+            hardttl = hardttl or config.DEFAULT_HARDTTL
+
             cache_data = {
                 "content": response.content.decode("utf-8") if response.content else "",
                 "status_code": response.status_code,
                 "headers": headers,
+                "cached_at": pendulum.now().timestamp(),
+                "soft_ttl": ttl,
+                "max_stale": maxstale,
             }
 
-            # Log large responses for monitoring purposes but don't block caching
-            content_size = len(json.dumps(cache_data).encode('utf-8'))
-            if content_size > 10 * 1024 * 1024:  # 10MB threshold for logging
-                logger.info(f"Large response cached ({content_size/1024/1024:.1f}MB): {cache_key}")
-
             redis = get_redis_client()
-            await redis.setex(cache_key, ttl, json.dumps(cache_data))
+            # Use hardttl for actual Redis expiration
+            await redis.setex(cache_key, hardttl, json.dumps(cache_data))
             await redis.close()
-            
-            # Update cache size in real-time
-            await update_current_cache_size()
-            
             return True
         return False
+
+    def get_cache_staleness(self, cache_data):
+        """Determine the staleness level of cached data.
+
+        Returns:
+            tuple: (status, data_age_seconds)
+                - status: "HIT" (fresh), "STALE", or "VERY-STALE"
+                - data_age_seconds: age of data in seconds
+        """
+        cached_at = cache_data.get("cached_at")
+        if not cached_at:
+            # Legacy cache entry without timestamp - treat as fresh
+            return "HIT", 0
+
+        now = pendulum.now().timestamp()
+        data_age = int(now - cached_at)
+        soft_ttl = cache_data.get("soft_ttl", config.DEFAULT_TTL)
+        max_stale = cache_data.get("max_stale", config.DEFAULT_MAXSTALE)
+
+        if data_age <= soft_ttl:
+            return "HIT", data_age
+        elif data_age <= max_stale:
+            return "STALE", data_age
+        else:
+            return "VERY-STALE", data_age
 
     async def list_cache(self):
         """List all cached endpoints with their expiration times"""
@@ -115,12 +147,6 @@ class CacheManager:
             cache_info.append(cache_entry)
 
         await redis.close()
-        
-        # Update cache size metrics
-        total_items = len(cache_info)
-        unique_endpoints = len(set(entry["endpoint"] for entry in cache_info))
-        update_cache_size_metrics(total_items, unique_endpoints)
-        
         return sorted(cache_info, key=lambda x: x["endpoint"])
 
     async def clear_cache(self, path):
@@ -140,10 +166,6 @@ class CacheManager:
         logger.info(f"Cleared cache for {path}")
 
         await redis.close()
-        
-        # Update cache size in real-time
-        await update_current_cache_size()
-        
         return {"cleared": bool(results[0]), "message": f"Cache cleared for {path}"}
 
     async def clear_all_cache(self):
@@ -168,134 +190,52 @@ class CacheManager:
         )
 
         await redis.close()
-        
-        # Update cache size in real-time (should be 0 after clearing all)
-        await update_current_cache_size()
 
         return {
             "message": f"Cleared {len(keys)} cache entries and {len(refresh_keys)} refresh tasks"
         }
 
-    async def get_production_metrics(self):
-        """Get comprehensive cache metrics for production monitoring"""
-        redis = get_redis_client()
-        
-        try:
-            # Basic key counts
-            cache_keys = await redis.keys("GET:*")
-            refresh_keys = await redis.keys("refresh:GET:*")
-            total_keys = await redis.dbsize()
-            
-            # Memory information
-            memory_info = await redis.info("memory")
-            stats_info = await redis.info("stats")
-            
-            # Calculate cache efficiency
-            hits = stats_info.get('keyspace_hits', 0)
-            misses = stats_info.get('keyspace_misses', 0)
-            hit_ratio = (hits / (hits + misses) * 100) if (hits + misses) > 0 else 0
-            
-            # Get largest keys information
-            largest_keys = []
-            try:
-                # Sample some keys to check sizes (limit to prevent performance impact)
-                sample_keys = cache_keys[:50] if len(cache_keys) > 50 else cache_keys
-                for key in sample_keys:
-                    memory_usage = await redis.memory_usage(key)
-                    if memory_usage and memory_usage > 100000:  # Only track keys > 100KB
-                        largest_keys.append({
-                            "key": key.decode('utf-8') if isinstance(key, bytes) else key,
-                            "size_mb": round(memory_usage / 1024 / 1024, 2)
-                        })
-                largest_keys.sort(key=lambda x: x['size_mb'], reverse=True)
-                largest_keys = largest_keys[:10]  # Top 10
-            except Exception as e:
-                logger.warning(f"Could not analyze key sizes: {e}")
-            
-            metrics = {
-                "cache_statistics": {
-                    "total_keys": total_keys,
-                    "cache_keys": len(cache_keys),
-                    "refresh_keys": len(refresh_keys),
-                    "other_keys": total_keys - len(cache_keys) - len(refresh_keys)
-                },
-                "memory_usage": {
-                    "used_memory_mb": round(memory_info.get('used_memory', 0) / 1024 / 1024, 2),
-                    "used_memory_rss_mb": round(memory_info.get('used_memory_rss', 0) / 1024 / 1024, 2),
-                    "used_memory_peak_mb": round(memory_info.get('used_memory_peak', 0) / 1024 / 1024, 2),
-                    "fragmentation_ratio": memory_info.get('mem_fragmentation_ratio', 0),
-                    "overhead_mb": round(memory_info.get('used_memory_overhead', 0) / 1024 / 1024, 2)
-                },
-                "performance": {
-                    "hit_ratio_percent": round(hit_ratio, 2),
-                    "total_commands": stats_info.get('total_commands_processed', 0),
-                    "ops_per_sec": stats_info.get('instantaneous_ops_per_sec', 0),
-                    "keyspace_hits": hits,
-                    "keyspace_misses": misses,
-                    "evicted_keys": stats_info.get('evicted_keys', 0),
-                    "expired_keys": stats_info.get('expired_keys', 0)
-                },
-                "largest_keys": largest_keys,
-                "timestamp": pendulum.now().isoformat()
-            }
-            
-            return metrics
-            
-        except Exception as e:
-            logger.error(f"Error getting production metrics: {e}")
-            return {"error": str(e)}
-        finally:
-            await redis.close()
+    async def background_refresh(self, cache_key, target_url, ttl, params=None, maxstale=None, hardttl=None):
+        """Trigger a single background refresh for stale-while-revalidate pattern.
 
-    async def optimize_memory_usage(self):
-        """Optimize memory usage without hard limits - production safe"""
-        redis = get_redis_client()
-        optimizations_performed = []
-        
-        try:
-            # Get memory information
-            memory_info = await redis.info("memory")
-            fragmentation_ratio = memory_info.get('mem_fragmentation_ratio', 1.0)
-            
-            # Optimize fragmentation if it's high
-            if fragmentation_ratio > 1.5:
-                try:
-                    await redis.memory_purge()
-                    optimizations_performed.append(f"Memory defragmentation initiated (was {fragmentation_ratio:.2f})")
-                except Exception as e:
-                    logger.warning(f"Could not perform memory purge: {e}")
-            
-            # Remove expired keys proactively
-            expired_count = 0
-            cache_keys = await redis.keys("GET:*")
-            
-            # Check TTL for a sample of keys and remove those close to expiring with no activity
-            sample_size = min(100, len(cache_keys))  # Limit to prevent performance impact
-            for key in cache_keys[:sample_size]:
-                ttl = await redis.ttl(key)
-                if ttl > 0 and ttl < 60:  # Keys expiring in less than 1 minute
-                    # Could implement additional logic here to check if key is being accessed
-                    pass  # For now, let Redis handle natural expiration
-            
-            # Log optimization results
-            if optimizations_performed:
-                logger.info("Memory optimizations performed: " + "; ".join(optimizations_performed))
-            
-            return {
-                "optimizations": optimizations_performed,
-                "fragmentation_ratio": fragmentation_ratio,
-                "total_keys_checked": sample_size
-            }
-            
-        except Exception as e:
-            logger.error(f"Error during memory optimization: {e}")
-            return {"error": str(e)}
-        finally:
-            await redis.close()
+        This method creates a background task that refreshes the cache once
+        without the autorefresh scheduling loop.
+        """
+        task = asyncio.create_task(
+            self._do_background_refresh(cache_key, target_url, ttl, params, maxstale, hardttl)
+        )
+        self.background_tasks.add(task)
+        task.add_done_callback(self.background_tasks.discard)
+        logger.info(f"Started background refresh for {cache_key}")
 
-        return {
-            "message": f"Cleared {len(keys)} cache entries and {len(refresh_keys)} refresh tasks"
-        }
+    async def _do_background_refresh(self, cache_key, target_url, ttl, params=None, maxstale=None, hardttl=None):
+        """Perform a single background refresh."""
+        client = None
+        try:
+            token = await self.token_manager.get_token()
+            headers = {"Authorization": f"Bearer {token['access_token']}"}
+
+            kwargs = {"headers": headers}
+            if params:
+                kwargs["params"] = params
+
+            client = get_http_client()
+            response = await client.get(target_url, **kwargs)
+
+            if 200 <= response.status_code < 300:
+                await self.cache_response(cache_key, response, ttl, maxstale, hardttl)
+
+                base_endpoint = extract_base_endpoint(target_url)[0]
+                CACHE_REFRESH.labels(endpoint=base_endpoint).inc()
+                logger.info(f"Background refresh successful for {cache_key}")
+            else:
+                logger.warning(f"Background refresh failed for {cache_key}: HTTP {response.status_code}")
+
+        except Exception as e:
+            logger.error(f"Error in background refresh for {cache_key}: {e}")
+        finally:
+            if client:
+                await client.aclose()
 
     async def setup_refresh(
         self, cache_key, target_url, ttl, autorefresh_until, params=None
@@ -343,42 +283,6 @@ class CacheManager:
 
         return False
 
-    async def fetch_and_cache(self, cache_key, target_url, ttl, params=None):
-        """Fetch data from URL and cache it with TTL (without setting up auto-refresh)"""
-        client = None
-        try:
-            # Get authentication token
-            token = await self.token_manager.get_token()
-            headers = {"Authorization": f"Bearer {token['access_token']}"}
-
-            kwargs = {"headers": headers}
-            if params:
-                kwargs["params"] = params
-
-            # Make HTTP request
-            client = get_http_client()
-            response = await client.get(target_url, **kwargs)
-
-            if 200 <= response.status_code < 300:
-                # Cache the response with TTL only
-                success = await self.cache_response(cache_key, response, ttl)
-                if success:
-                    logger.debug(f"Successfully cached data for {cache_key}")
-                    return True
-                else:
-                    logger.warning(f"Failed to cache response for {cache_key}")
-                    return False
-            else:
-                logger.error(f"Failed to fetch data for {cache_key}: HTTP {response.status_code}")
-                return False
-
-        except Exception as e:
-            logger.error(f"Error fetching and caching data for {cache_key}: {e}")
-            return False
-        finally:
-            if client:
-                await client.aclose()
-
     async def refresh_cache_task(
         self, url, ttl, refresh_until_date, params=None, cache_key=None
     ):
@@ -415,7 +319,7 @@ class CacheManager:
                 await self.cache_response(cache_key, response, ttl)
 
                 base_endpoint = extract_base_endpoint(url)[0]
-                record_cache_refresh(base_endpoint)
+                CACHE_REFRESH.labels(endpoint=base_endpoint).inc()
                 logger.info(f"Successfully refreshed cache for {url}")
 
                 # Schedule next refresh
